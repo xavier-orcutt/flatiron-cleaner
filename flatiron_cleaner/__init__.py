@@ -4,7 +4,7 @@ FlatironCleaner
 A Python package for cleaning and harmonizing Flatiron Health cancer data.
 """
 
-__version__ = '0.1.4'
+__version__ = '0.1.5'
 
 # Make key classes available at package level
 from .urothelial import DataProcessorUrothelial
