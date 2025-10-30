@@ -2733,7 +2733,7 @@ class DataProcessorNSCLC:
         oral_path : str
             Path to Enhanced_AdvNSCLC_Orals.csv file, using StartDate and EndDate to determine last EHR activity date for censored patients
         progression_path : str
-            Path to Enhanced_AdvNSCLC_Progression.csv file, using ProgresionDate and LastClinicNoteDate to determine last EHR activity date for censored patients
+            Path to Enhanced_AdvNSCLC_Progression.csv file, using ProgressionDate and LastClinicNoteDate to determine last EHR activity date for censored patients
         drop_dates : bool, default = True
             If True, drops date columns (index_date_column, DateOfDeath, last_ehr_date)   
         
