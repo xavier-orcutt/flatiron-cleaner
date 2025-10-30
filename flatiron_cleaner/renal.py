@@ -65,6 +65,25 @@ class DataProcessorRenal:
         'PR': 'unknown'
     }
 
+    PDL1_PERCENT_STAINING_MAPPING = {
+        np.nan: 0,
+        '0%': 1, 
+        '< 1%': 2,
+        '1%': 3, 
+        '2% - 4%': 4,
+        '5% - 9%': 5,
+        '10% - 19%': 6,  
+        '20% - 29%': 7, 
+        '30% - 39%': 8, 
+        '40% - 49%': 9, 
+        '50% - 59%': 10, 
+        '60% - 69%': 11, 
+        '70% - 79%': 12, 
+        '80% - 89%': 13, 
+        '90% - 99%': 14,
+        '100%': 15
+    }
+
     INSURANCE_MAPPING = {
         'Commercial Health Plan': 'commercial',
         'Medicare': 'medicare',
