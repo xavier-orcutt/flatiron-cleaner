@@ -11,7 +11,7 @@ Key features of the package include:
 
 ## Installation
 
-Requires python >= 3.10
+Built and tested in python 3.13.
 
 ```python
 pip install flatiron-cleaner 
@@ -31,6 +31,7 @@ The following cancers have their own dedicated data processor class:
 | Metastatic Colorectal Cancer | `DataProcessorColorectal` |
 | Metastatic Breast Cancer | `DataProcessorBreast` |
 | Metastatic Prostate Cancer | `DataProcessorProstate` |
+| Metastatic Renal Cell Cancer | `DataProcessorRenal` |
 
 ### General Processor 
 
@@ -60,9 +61,6 @@ Cancer-specific classes contain additional methods (e.g., `process_enhanced()` a
 
 ```python
 from flatiron_cleaner import DataProcessorUrothelial
-
-# View all methods and documentation
-help(DataProcessorUrothelial)
 
 ```
 
