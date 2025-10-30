@@ -4,7 +4,7 @@ FlatironCleaner
 A Python package for cleaning and harmonizing Flatiron Health cancer data.
 """
 
-__version__ = '0.1.1'
+__version__ = '0.1.4'
 
 # Make key classes available at package level
 from .urothelial import DataProcessorUrothelial
@@ -12,6 +12,7 @@ from .nsclc import DataProcessorNSCLC
 from .colorectal import DataProcessorColorectal
 from .breast import DataProcessorBreast
 from .prostate import DataProcessorProstate
+from .renal import DataProcessorRenal
 from .general import DataProcessorGeneral
 from .merge_utils import merge_dataframes
 
@@ -22,6 +23,7 @@ __all__ = [
     'DataProcessorColorectal',
     'DataProcessorBreast',
     'DataProcessorProstate',
+    'DataProcessorRenal',
     'DataProcessorGeneral',
     'merge_dataframes',
 ]
