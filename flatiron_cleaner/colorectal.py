@@ -432,7 +432,7 @@ class DataProcessorColorectal:
                 consolidated overall staging (0-IV, Unknown) at time of first diagnosis
             - days_diagnosis_to_met : float
                 days from first diagnosis to metastatic disease 
-            - adv_diagnosis_year : category
+            - met_diagnosis_year : category
                 year of metastatic diagnosis 
             
             Original staging and date columns (DiagnosisDate and MetDiagnosisDate) retained if respective drop_* = False
@@ -714,12 +714,12 @@ class DataProcessorColorectal:
                            days_before: Optional[int] = None,
                            days_after: int = 0) -> Optional[pd.DataFrame]:
         """
-        Processes Enhanced_MetCRCCBiomarkers.csv by determining biomarker status for each patient within a specified time window relative to an index date. 
+        Processes Enhanced_MetCRCBiomarkers.csv by determining biomarker status for each patient within a specified time window relative to an index date. 
 
         Parameters
         ----------
         file_path : str
-            Path to Enhanced_AdvNSCLCBiomarkers.csv file
+            Path to Enhanced_MetCRCBiomarkers.csv file
         index_date_df : pd.DataFrame
             DataFrame containing unique PatientIDs and their corresponding index dates. Only biomarker data for PatientIDs present in this DataFrame will be processed
         index_date_column : str
@@ -792,7 +792,7 @@ class DataProcessorColorectal:
 
         try:
             df = pd.read_csv(file_path)
-            logging.info(f"Successfully read Enhanced_MetCRCCBiomarkers.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+            logging.info(f"Successfully read Enhanced_MetCRCBiomarkers.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
 
             df['ResultDate'] = pd.to_datetime(df['ResultDate'])
             df['SpecimenReceivedDate'] = pd.to_datetime(df['SpecimenReceivedDate'])
@@ -810,7 +810,7 @@ class DataProcessorColorectal:
                     on = 'PatientID',
                     how = 'left'
             )
-            logging.info(f"Successfully merged Enhanced_MetCRCCBiomarkers.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+            logging.info(f"Successfully merged Enhanced_MetCRCBiomarkers.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
             
             # Create new variable 'index_to_result' that notes difference in days between resulted specimen and index date
             df['index_to_result'] = (df['ResultDate'] - df[index_date_column]).dt.days
@@ -880,12 +880,12 @@ class DataProcessorColorectal:
                 duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
                 logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
 
-            logging.info(f"Successfully processed Enhanced_MetCRCCBiomarkers.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
+            logging.info(f"Successfully processed Enhanced_MetCRCBiomarkers.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
             self.biomarkers_df = final_df
             return final_df
 
         except Exception as e:
-            logging.error(f"Error processing Enhanced_MetCRCCBiomarkers.csv file: {e}")
+            logging.error(f"Error processing Enhanced_MetCRCBiomarkers.csv file: {e}")
             return None
         
     def process_ecog(self, 
@@ -2619,7 +2619,6 @@ class DataProcessorColorectal:
                           telemedicine_path: str = None, 
                           biomarkers_path: str = None, 
                           oral_path: str = None,
-                          progression_path: str = None,
                           drop_dates: bool = True) -> Optional[pd.DataFrame]:
         """
         Processes Enhanced_Mortality_V2.csv by cleaning data types, calculating time from index date to death/censor, and determining mortality events. 
