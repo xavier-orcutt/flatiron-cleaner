@@ -13,6 +13,7 @@ from .colorectal import DataProcessorColorectal
 from .breast import DataProcessorBreast
 from .prostate import DataProcessorProstate
 from .renal import DataProcessorRenal
+from .melanoma import DataProcessorMelanoma
 from .general import DataProcessorGeneral
 from .merge_utils import merge_dataframes
 
@@ -24,6 +25,7 @@ __all__ = [
     'DataProcessorBreast',
     'DataProcessorProstate',
     'DataProcessorRenal',
+    'DataProcessoreMelanoma',
     'DataProcessorGeneral',
     'merge_dataframes',
 ]
