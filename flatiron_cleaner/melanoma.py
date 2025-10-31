@@ -2445,7 +2445,6 @@ class DataProcessorMelanoma:
                           days_after: int = 0) -> Optional[pd.DataFrame]:
         """
         Processes Diagnosis.csv by mapping ICD 9 and 10 codes to Elixhauser comorbidity index and calculates a van Walraven score. 
-        It also determines site of metastases based on ICD 9 and 10 codes. 
         
         Parameters
         ----------
@@ -2494,15 +2493,6 @@ class DataProcessorMelanoma:
             - psychoses : binary indicator for psychoses
             - depression : binary indicator for depression
             - van_walraven_score : weighted composite of the binary Elixhauser comorbidities 
-            - lymph_met : binary indicator for lymph node metastasis
-            - thoracic_met : binary indicator for thoracic metastasis (eg., lung, pleura, mediastinum, or other respiratory)
-            - liver_met : binary indicator for liver metastasis
-            - bone_met : binary indicator for bone metastasis
-            - brain_met : binary indicator for brain/CNS metastasis
-            - adrenal_met : binary indicator for adrenal metastasis
-            - peritoneum_met : binary indicator for peritoneal/retroperitoneal metastasis
-            - gi_met : binary indicator for gastrointestinal tract metastasis excluding liver, adrenal, and peritoneum
-            - other_met : binary indicator for other sites of metastasis
 
         Notes
         -----
@@ -2624,56 +2614,9 @@ class DataProcessorMelanoma:
             van_walraven_score = df_elix_combined.drop('PatientID', axis=1).mul(self.VAN_WALRAVEN_WEIGHTS).sum(axis=1)
             df_elix_combined['van_walraven_score'] = van_walraven_score
 
-            # Metastatic sites based on ICD-9 codes 
-            df9_mets = (
-                df_filtered
-                .query('DiagnosisCodeSystem == "ICD-9-CM"')
-                .assign(diagnosis_code = lambda x: x['DiagnosisCode'].replace(r'\.', '', regex=True)) # Remove decimal points from ICD-9 codes to make mapping easier 
-                .drop_duplicates(subset = ['PatientID', 'diagnosis_code'], keep = 'first')
-                .assign(met_site=lambda x: x['diagnosis_code'].map(
-                    lambda code: next((site for pattern, site in self.ICD_9_METS_MAPPING.items()
-                                    if re.match(pattern, code)), 'no_met')))
-                .query('met_site != "no_met"') 
-                .drop_duplicates(subset=['PatientID', 'met_site'], keep = 'first')
-                .assign(value=1)  # Add a column of 1s to use for pivot
-                .pivot(index = 'PatientID', columns = 'met_site', values = 'value')
-                .fillna(0) 
-                .astype('Int64')  
-                .rename_axis(columns = None)
-                .reset_index()
-            )
-
-            # Metastatic sites based on ICD-10 codes 
-            df10_mets = (
-                df_filtered
-                .query('DiagnosisCodeSystem == "ICD-10-CM"')
-                .assign(diagnosis_code = lambda x: x['DiagnosisCode'].replace(r'\.', '', regex=True)) # Remove decimal points from ICD-9 codes to make mapping easier 
-                .drop_duplicates(subset = ['PatientID', 'diagnosis_code'], keep = 'first')
-                .assign(met_site=lambda x: x['diagnosis_code'].map(
-                    lambda code: next((site for pattern, site in self.ICD_10_METS_MAPPING.items()
-                                    if re.match(pattern, code)), 'no_met')))
-                .query('met_site != "no_met"') 
-                .drop_duplicates(subset=['PatientID', 'met_site'], keep = 'first')
-                .assign(value=1)  # Add a column of 1s to use for pivot
-                .pivot(index = 'PatientID', columns = 'met_site', values = 'value')
-                .fillna(0) 
-                .astype('Int64')  
-                .rename_axis(columns = None)
-                .reset_index()
-            )
-
-            all_columns_mets = ['PatientID'] + list(self.ICD_9_METS_MAPPING.values())
-            
-            # Reindex both dataframes to have all columns, filling missing ones with 0
-            df9_mets_aligned = df9_mets.reindex(columns = all_columns_mets, fill_value = 0)
-            df10_mets_aligned = df10_mets.reindex(columns = all_columns_mets, fill_value = 0)
-
-            df_mets_combined = pd.concat([df9_mets_aligned, df10_mets_aligned]).groupby('PatientID').max().reset_index()
-
             # Start with index_date_df to ensure all PatientIDs are included
             final_df = index_date_df[['PatientID']].copy()
             final_df = pd.merge(final_df, df_elix_combined, on = 'PatientID', how = 'left')
-            final_df = pd.merge(final_df, df_mets_combined, on = 'PatientID', how = 'left')
 
             binary_columns = [col for col in final_df.columns 
                     if col not in ['PatientID', 'van_walraven_score']]
