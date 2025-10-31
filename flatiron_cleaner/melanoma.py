@@ -396,6 +396,27 @@ class DataProcessorMelanoma:
         'Workers Compensation': 'other_insurance'
     }
 
+    METASTASIS_MAPPING = {
+        'Bone': 'bone_met',
+        'Liver': 'liver_met',
+        'Lung': 'thoracic_met',
+        'Pleura': 'thoracic_met',
+        'Distant lymph node': 'lymph_met',
+        'Brain': 'brain_met',
+        'CNS site': 'brain_met', 
+        'Other': 'other_met',
+        'Skin': 'skin_met',
+        'Soft tissue': 'skin_met',
+        'Bone marrow': 'bone_met', 
+        'Peritoneum': 'other_viscera_met',
+        'Adrenal': 'other_viscera_met',
+        'Ovary': 'other_viscera_met',
+        'Spleen': 'other_viscera_met',
+        'Pancreas': 'other_viscera_met',
+        'Kidney': 'other_viscera_met',
+        'Thyroid': 'other_viscera_met'
+    }
+
     def __init__(self):
         self.enhanced_df = None
         self.demographics_df = None
@@ -408,6 +429,7 @@ class DataProcessorMelanoma:
         self.medications_df = None
         self.diagnosis_df = None
         self.insurance_df = None
+        self.metastasis_df = None
 
     def process_enhanced(self,
                          file_path: str,
@@ -2919,4 +2941,146 @@ class DataProcessorMelanoma:
 
         except Exception as e:
             logging.error(f"Error processing Insurance.csv file: {e}")
+            return None
+        
+    def process_metastasis(self, 
+                           file_path: str,
+                           index_date_df: pd.DataFrame,
+                           index_date_column: str,
+                           days_before: Optional[int] = None,
+                           days_after: int = 0) -> Optional[pd.DataFrame]:
+        """
+        Processes sites of metastasis data relative to a specified index date.
+        
+        Parameters
+        ----------
+        file_path : str
+            Path to Enhanced_AdvMelanoma_SitesOfMet.csv file
+        index_date_df : pd.DataFrame
+            DataFrame containing unique PatientIDs and their corresponding index dates. Only metastasis information for PatientIDs present in this DataFrame will be processed
+        index_date_column : str
+            Column name in index_date_df containing the index date
+        days_before : int | None, optional
+            Number of days before the index date to include for window period. Must be >= 0 or None. If None, includes all prior results. Default: None
+        days_after : int, optional
+            Number of days after the index date to include for window period. Must be >= 0. Default: 0
+        
+        Returns
+        -------
+        pd.DataFrame or None
+            - PatientID : object
+                unique patient identifier
+            - bone_met : Int64
+                binary indicator (0/1) for bone or bone marrow metastasis
+            - liver_met : Int64
+                binary indicator (0/1) for liver metastasis
+            - thoracic_met : Int64
+                binary indicator (0/1) for lung or pleura metastasis
+            - lymph_met : Int64
+                binary indicator (0/1) for distant lymph node metastasis
+            - brain_met : Int64
+                binary indicator (0/1) for brain or CNS site metastasis
+            - skin_met : Int64
+                binary indicator (0/1) for skin or soft tissue metastasis
+            - other_viscera_met : Int64
+                binary indicator (0/1) for peritoneum, adrenal, ovary, spleen, pancreas, kidney, or thyroid metastasis 
+            - other_met : Int64
+                binary indicator (0/1) for other metastasis
+                
+        Notes
+        -----
+        The DateOfMetastasis variable is recorded at the month level. When converted to a datetime, the first day of that month is imputed.
+        
+        Output handling:
+        - Duplicate PatientIDs are logged as warnings but retained in output
+        - Results are stored in self.metastasis_df attribute
+        """
+        # Input validation
+        if not isinstance(index_date_df, pd.DataFrame):
+            raise ValueError("index_date_df must be a pandas DataFrame")
+        if 'PatientID' not in index_date_df.columns:
+            raise ValueError("index_date_df must contain a 'PatientID' column")
+        if not index_date_column or index_date_column not in index_date_df.columns:
+            raise ValueError('index_date_column not found in index_date_df')
+        if index_date_df['PatientID'].duplicated().any():
+            raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
+        
+        if days_before is not None:
+            if not isinstance(days_before, int) or days_before < 0:
+                raise ValueError("days_before must be a non-negative integer or None")
+        if not isinstance(days_after, int) or days_after < 0:
+            raise ValueError("days_after must be a non-negative integer")
+        
+        index_date_df = index_date_df.copy()
+        # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
+        for col in index_date_df.columns:
+            if col != 'PatientID':  # Keep PatientID unchanged for merging
+                index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
+
+        # Update index_date_column name
+        index_date_column = f'imported_{index_date_column}'
+
+        try:
+            df = pd.read_csv(file_path)
+            logging.info(f"Successfully read Enhanced_AdvMelanoma_SitesOfMet.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
+            df['DateOfMetastasis'] = pd.to_datetime(df['DateOfMetastasis'])
+            index_date_df[index_date_column] = pd.to_datetime(index_date_df[index_date_column])
+
+            # Select PatientIDs that are included in the index_date_df the merge on 'left'
+            df = df[df.PatientID.isin(index_date_df.PatientID)]
+            df = pd.merge(
+                df,
+                index_date_df[['PatientID', index_date_column]],
+                on = 'PatientID',
+                how = 'left'
+            )
+            logging.info(f"Successfully merged Enhanced_AdvMelanoma_SitesOfMet.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
+            df['index_to_met'] = (df['DateOfMetastasis'] - df[index_date_column]).dt.days
+
+            if days_before is None:
+                # Only filter for days after
+                df_filtered = df[df['index_to_met'] <= days_after].copy()
+            else:
+                # Filter for both before and after
+                df_filtered = df[
+                    (df['index_to_met'] <= days_after) & 
+                    (df['index_to_met'] >= -days_before)
+                ].copy()
+
+            df_met = (
+                df_filtered
+                .assign(met_site = lambda x: x['SiteOfMetastasis'].map(self.METASTASIS_MAPPING))
+                .drop_duplicates(subset=['PatientID', 'met_site'], keep = 'first')
+                .assign(value=1)  # Add a column of 1s to use for pivot
+                .pivot(index = 'PatientID', columns = 'met_site', values = 'value')
+                .fillna(0) 
+                .astype('Int64')  
+                .rename_axis(columns = None)
+                .reset_index()
+            )
+
+            all_columns = ['PatientID'] + list(set(self.METASTASIS_MAPPING.values()))
+            df_met_aligned = df_met.reindex(columns = all_columns, fill_value = 0)
+            
+            # Start with index_date_df to ensure all PatientIDs are included
+            final_df = index_date_df[['PatientID']].copy()
+            final_df = pd.merge(final_df, df_met_aligned, on = 'PatientID', how = 'left')
+
+            binary_columns = [col for col in final_df.columns 
+                    if col not in ['PatientID']]
+            final_df[binary_columns] = final_df[binary_columns].fillna(0).astype('Int64')
+
+            # Check for duplicate PatientIDs
+            if len(final_df) > final_df['PatientID'].nunique():
+                duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
+                logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
+
+            logging.info(f"Successfully processed Enhanced_AdvMelanoma_SitesOfMet.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
+            self.mortality_df = final_df
+            return final_df
+        
+        except Exception as e:
+            logging.error(f"Error processing Enhanced_AdvMelanoma_SitesOfMet.csv file: {e}")
             return None
