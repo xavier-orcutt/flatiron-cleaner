@@ -3022,7 +3022,7 @@ class DataProcessorBreast:
                 logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
 
             logging.info(f"Successfully processed Enhanced_MetBreastSitesOfMet.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
-            self.mortality_df = final_df
+            self.metastasis = final_df
             return final_df
         
         except Exception as e:
