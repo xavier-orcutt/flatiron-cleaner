@@ -2936,7 +2936,6 @@ class DataProcessorBreast:
         Notes
         -----
         Output handling:
-        - All PatientIDs from index_date_df are included in the output and value is set to 0 for those without insurance type 
         - Duplicate PatientIDs are logged as warnings but retained in output
         - Results are stored in self.metastasis_df attribute
         """
