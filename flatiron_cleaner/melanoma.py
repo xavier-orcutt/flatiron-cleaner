@@ -1086,8 +1086,12 @@ class DataProcessorMelanoma:
         pd.DataFrame or None
             - PatientID : object
                 unique patient identifier
-            - FGFR_status : category
+            - BRAF_status : category
                 positive if ever-positive, negative if only-negative, otherwise unknown
+            - NRAS_status : category
+                positive if ever-positive, negative if only-negative, otherwise unknown
+            - KIT_status : category
+                positive if ever-positive, negative if only-negative, otherwise unknown    
             - PDL1_status : category
                 positive if ever-positive, negative if only-negative, otherwise unknown
             - PDL1_percent_staining : category, ordered 
@@ -1171,20 +1175,24 @@ class DataProcessorMelanoma:
                     (df['index_to_result'] >= -days_before)
                 ].copy()
 
-            # Process FGFR status
-            FGFR_df = (
-                df_filtered
-                .query('BiomarkerName == "FGFR"')
-                .groupby('PatientID')['BiomarkerStatus']
-                .agg(lambda x: 'positive' if any ('Positive' in val for val in x)
-                    else ('negative' if any('Negative' in val for val in x)
-                        else 'unknown'))
-                .reset_index()
-                .rename(columns={'BiomarkerStatus': 'FGFR_status'})
+            # Create an empty dictionary to store the dataframes
+            biomarker_dfs = {}
+
+            # Process BRAF, KRAS, and NRAS
+            for biomarker in ['BRAF', 'NRAS', 'KIT']:
+                biomarker_dfs[biomarker] = (
+                    df_filtered
+                    .query(f'BiomarkerName == "{biomarker}"')
+                    .groupby('PatientID')['BiomarkerStatus']
+                    .agg(lambda x: 'positive' if any('Mutation positive' in val for val in x)
+                        else ('negative' if any('Mutation negative' in val for val in x)
+                            else 'unknown'))
+                    .reset_index()
+                    .rename(columns={'BiomarkerStatus': f'{biomarker}_status'}) 
             )
             
-            # Process PDL1 status
-            PDL1_df = (
+            # Process PDL1 and add to biomarker_dfs
+            biomarker_dfs['PDL1'] = (
                 df_filtered
                 .query('BiomarkerName == "PDL1"')
                 .groupby('PatientID')['BiomarkerStatus']
@@ -1215,23 +1223,26 @@ class DataProcessorMelanoma:
 
             # Merge dataframes -- start with index_date_df to ensure all PatientIDs are included
             final_df = index_date_df[['PatientID']].copy()
-            final_df = pd.merge(final_df, PDL1_df, on = 'PatientID', how = 'left')
-            final_df = pd.merge(final_df, PDL1_staining_df, on = 'PatientID', how = 'left')
-            final_df = pd.merge(final_df, FGFR_df, on = 'PatientID', how = 'left')
 
-            final_df['PDL1_status'] = final_df['PDL1_status'].astype('category')
-            final_df['FGFR_status'] = final_df['FGFR_status'].astype('category')
+            for biomarker in ['BRAF', 'NRAS', 'KIT', 'PDL1']:
+                final_df = pd.merge(final_df, biomarker_dfs[biomarker], on = 'PatientID', how = 'left')
+
+            final_df = pd.merge(final_df, PDL1_staining_df, on = 'PatientID', how = 'left')
+
+            # Convert to category type
+            for biomarker_status in ['BRAF_status', 'NRAS_status', 'KIT_status', 'PDL1_status']:
+                final_df[biomarker_status] = final_df[biomarker_status].astype('category')
 
             staining_dtype = pd.CategoricalDtype(
                 categories = ['0%', '< 1%', '1%', '2% - 4%', '5% - 9%', '10% - 19%',
-                              '20% - 29%', '30% - 39%', '40% - 49%', '50% - 59%',
-                              '60% - 69%', '70% - 79%', '80% - 89%', '90% - 99%', '100%'],
-                              ordered = True
+                                '20% - 29%', '30% - 39%', '40% - 49%', '50% - 59%',
+                                '60% - 69%', '70% - 79%', '80% - 89%', '90% - 99%', '100%'],
+                                ordered = True
             )
             
             final_df['PDL1_percent_staining'] = final_df['PDL1_percent_staining'].astype(staining_dtype)
 
-            # Check for duplicate PatientIDs
+           # Check for duplicate PatientIDs
             if len(final_df) > final_df['PatientID'].nunique():
                 duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
                 logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
