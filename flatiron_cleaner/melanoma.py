@@ -417,6 +417,32 @@ class DataProcessorMelanoma:
         'Thyroid': 'other_viscera_met'
     }
 
+    PROCEDURE_MAPPING = {
+        # Primary site
+        'Biopsy of primary': 'primary_site_procedure',
+        'Local wide excision of primary': 'primary_site_procedure',
+        'Re-excision of primary': 'primary_site_procedure',
+        'Unspecified procedure to primary': 'primary_site_procedure',
+        
+        # Lymph nodes
+        'Biopsy of lymph nodes': 'lymph_node_procedure',
+        'Lymphadenectomy': 'lymph_node_procedure',
+        'Re-excision of lymph nodes': 'lymph_node_procedure',
+        
+        # Recurrent / in-transit
+        'Biopsy of skin/subcutaneous recurrence': 'recurrent_or_intransit_procedure',
+        'Unspecified procedure to lymph nodes or intransit metastases': 'recurrent_or_intransit_procedure',
+        'Excision of skin/subcutaneous recurrence': 'recurrent_or_intransit_procedure',
+        'Re-excision of skin/subcutaneous recurrence': 'recurrent_or_intransit_procedure',
+        'Excision of intransit metastases': 'recurrent_or_intransit_procedure',
+        'Biopsy of intransit metastases': 'recurrent_or_intransit_procedure',
+        'Excision of intransit metastases (recurrent)': 'recurrent_or_intransit_procedure',
+        'Lymphadenectomy (recurrent)': 'recurrent_or_intransit_procedure',
+        'Biopsy of lymph nodes (recurrent)': 'recurrent_or_intransit_procedure',
+        'Re-excision of lymph nodes (recurrent)': 'recurrent_or_intransit_procedure',
+        'Unspecified procedure to locoregional recurrence': 'recurrent_or_intransit_procedure'
+    }
+
     def __init__(self):
         self.enhanced_df = None
         self.demographics_df = None
@@ -430,6 +456,7 @@ class DataProcessorMelanoma:
         self.diagnosis_df = None
         self.insurance_df = None
         self.metastasis_df = None
+        self.proceudre_df = None 
 
     def process_enhanced(self,
                          file_path: str,
@@ -3078,9 +3105,139 @@ class DataProcessorMelanoma:
                 logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
 
             logging.info(f"Successfully processed Enhanced_AdvMelanoma_SitesOfMet.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
-            self.mortality_df = final_df
+            self.metastasis_df = final_df
             return final_df
         
         except Exception as e:
             logging.error(f"Error processing Enhanced_AdvMelanoma_SitesOfMet.csv file: {e}")
+            return None
+        
+    def process_procedures(self, 
+                           file_path: str,
+                           index_date_df: pd.DataFrame,
+                           index_date_column: str,
+                           days_before: Optional[int] = None,
+                           days_after: int = 0) -> Optional[pd.DataFrame]:
+        """
+        Processes procedure data relative to a specified index date.
+        
+        Parameters
+        ----------
+        file_path : str
+            Path to Enhanced_AdvMelanoma_SitesOfMet.csv file
+        index_date_df : pd.DataFrame
+            DataFrame containing unique PatientIDs and their corresponding index dates. Only procedure information for PatientIDs present in this DataFrame will be processed
+        index_date_column : str
+            Column name in index_date_df containing the index date
+        days_before : int | None, optional
+            Number of days before the index date to include for window period. Must be >= 0 or None. If None, includes all prior results. Default: None
+        days_after : int, optional
+            Number of days after the index date to include for window period. Must be >= 0. Default: 0
+        
+        Returns
+        -------
+        pd.DataFrame or None
+            - PatientID : object
+                unique patient identifier
+            - primary_site_procedure : Int64
+                binary indicator for whether any primary-site procedure occurred within the window period
+            - lymph_note_procedure : Int64 
+                binary indicator for whether any lymph-node procedure occurred within the window period
+            - recurrent_or_intransit_procedure : Int64
+                binary indicator for whether any recurrent or in-transit procedure occurred within the window period
+
+        Notes
+        -----
+        Output handling:
+        - Duplicate PatientIDs are logged as warnings but retained in output
+        - Results are stored in self.metastasis_df attribute
+        """
+        # Input validation
+        if not isinstance(index_date_df, pd.DataFrame):
+            raise ValueError("index_date_df must be a pandas DataFrame")
+        if 'PatientID' not in index_date_df.columns:
+            raise ValueError("index_date_df must contain a 'PatientID' column")
+        if not index_date_column or index_date_column not in index_date_df.columns:
+            raise ValueError('index_date_column not found in index_date_df')
+        if index_date_df['PatientID'].duplicated().any():
+            raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
+        
+        if days_before is not None:
+            if not isinstance(days_before, int) or days_before < 0:
+                raise ValueError("days_before must be a non-negative integer or None")
+        if not isinstance(days_after, int) or days_after < 0:
+            raise ValueError("days_after must be a non-negative integer")
+        
+        index_date_df = index_date_df.copy()
+        # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
+        for col in index_date_df.columns:
+            if col != 'PatientID':  # Keep PatientID unchanged for merging
+                index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
+
+        # Update index_date_column name
+        index_date_column = f'imported_{index_date_column}'
+
+        try:
+            df = pd.read_csv(file_path)
+            logging.info(f"Successfully read Enhanced_AdvMelanomaProcedures.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
+            df['ProcedureDate'] = pd.to_datetime(df['ProcedureDate'])
+            index_date_df[index_date_column] = pd.to_datetime(index_date_df[index_date_column])
+
+            # Select PatientIDs that are included in the index_date_df the merge on 'left'
+            df = df[df.PatientID.isin(index_date_df.PatientID)]
+            df = pd.merge(
+                df,
+                index_date_df[['PatientID', index_date_column]],
+                on = 'PatientID',
+                how = 'left'
+            )
+            logging.info(f"Successfully merged Enhanced_AdvMelanomaProcedures.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
+            df['index_to_procedure'] = (df['ProcedureDate'] - df[index_date_column]).dt.days
+
+            if days_before is None:
+                # Only filter for days after
+                df_filtered = df[df['index_to_procedure'] <= days_after].copy()
+            else:
+                # Filter for both before and after
+                df_filtered = df[
+                    (df['index_to_procedure'] <= days_after) & 
+                    (df['index_to_procedure'] >= -days_before)
+                ].copy()
+
+            df_procedure = (
+                df_filtered
+                .assign(procedure_type = lambda x: x['ProcedureType'].map(self.PROCEDURE_MAPPING))
+                .drop_duplicates(subset=['PatientID', 'procedure_type'], keep = 'first')
+                .assign(value=1)  # Add a column of 1s to use for pivot
+                .pivot(index = 'PatientID', columns = 'procedure_type', values = 'value')
+                .fillna(0) 
+                .astype('Int64')  
+                .rename_axis(columns = None)
+                .reset_index()
+            )
+
+            all_columns = ['PatientID'] + list(set(self.PROCEDURE_MAPPING.values()))
+            df_procedure_aligned = df_procedure.reindex(columns = all_columns, fill_value = 0)
+            
+            # Start with index_date_df to ensure all PatientIDs are included
+            final_df = index_date_df[['PatientID']].copy()
+            final_df = pd.merge(final_df, df_procedure_aligned, on = 'PatientID', how = 'left')
+
+            binary_columns = [col for col in final_df.columns 
+                    if col not in ['PatientID']]
+            final_df[binary_columns] = final_df[binary_columns].fillna(0).astype('Int64')
+
+            # Check for duplicate PatientIDs
+            if len(final_df) > final_df['PatientID'].nunique():
+                duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
+                logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
+
+            logging.info(f"Successfully processed Enhanced_AdvMelanomaProcedures.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
+            self.procedure_df = final_df
+            return final_df
+        
+        except Exception as e:
+            logging.error(f"Error processing Enhanced_AdvMelanomaProcedures.csv file: {e}")
             return None
