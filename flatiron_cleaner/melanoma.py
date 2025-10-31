@@ -785,6 +785,7 @@ class DataProcessorMelanoma:
                           biomarkers_path: str = None, 
                           oral_path: str = None,
                           progression_path: str = None,
+                          metastatic_sites_path: str = None,
                           drop_dates: bool = True) -> Optional[pd.DataFrame]:
         """
         Processes Enhanced_Mortality_V2.csv by cleaning data types, calculating time from index date to death/censor, and determining mortality events. 
@@ -802,11 +803,13 @@ class DataProcessorMelanoma:
         telemedicine_path : str
             Path to Telemedicine.csv file, using VisitDate to determine last EHR activity date for censored patients
         biomarkers_path : str
-            Path to Enhanced_AdvUrothelialBiomarkers.csv file, using SpecimenCollectedDate to determine last EHR activity date for censored patients
+            Path to Enhanced_AdvMelanomaBiomarkers.csv file, using SpecimenCollectedDate to determine last EHR activity date for censored patients
         oral_path : str
-            Path to Enhanced_AdvUrothelial_Orals.csv file, using StartDate and EndDate to determine last EHR activity date for censored patients
+            Path to Enhanced_AdvMelanoma_Orals.csv file, using StartDate and EndDate to determine last EHR activity date for censored patients
         progression_path : str
-            Path to Enhanced_AdvUrothelial_Progression.csv file, using ProgresionDate and LastClinicNoteDate to determine last EHR activity date for censored patients
+            Path to Enhanced_AdvMelanoma_Progression.csv file, using ProgresionDate and LastClinicNoteDate to determine last EHR activity date for censored patients
+        metastatic_sites_path : str
+            Path to Enhanced_AdvMelanoma_SitesOfMet.csv file, using DateOfMetastasis to determine last EHR activity date for censored patients
         drop_dates : bool, default = True
             If True, drops date columns (index_date_column, DateOfDeath, last_ehr_date)   
         
@@ -898,8 +901,8 @@ class DataProcessorMelanoma:
             patient_last_dates = []
 
             # Determine last EHR data
-            if all(path is None for path in [visit_path, telemedicine_path, biomarkers_path, oral_path, progression_path]):
-                logging.info("WARNING: At least one of visit_path, telemedicine_path, biomarkers_path, oral_path, or progression_path must be provided to calculate duration for those with a missing death date")
+            if all(path is None for path in [visit_path, telemedicine_path, biomarkers_path, oral_path, progression_path, metastatic_sites_path]):
+                logging.info("WARNING: At least one of visit_path, telemedicine_path, biomarkers_path, oral_path, progression_path, or metastatic_sites_path must be provided to calculate duration for those with a missing death date")
             else: 
                 # Process visit and telemedicine data
                 if visit_path is not None or telemedicine_path is not None:
@@ -945,7 +948,7 @@ class DataProcessorMelanoma:
                         )
                         patient_last_dates.append(df_biomarkers_max)
                     except Exception as e:
-                        logging.error(f"Error reading Enhanced_AdvUrothelialBiomarkers.csv file: {e}")
+                        logging.error(f"Error reading Enhanced_AdvMelanomaBiomarkers.csv file: {e}")
 
                 # Process oral medication data
                 if oral_path is not None:
@@ -965,7 +968,7 @@ class DataProcessorMelanoma:
                         )
                         patient_last_dates.append(df_oral_max)
                     except Exception as e:
-                        logging.error(f"Error reading Enhanced_AdvUrothelial_Orals.csv file: {e}")
+                        logging.error(f"Error reading Enhanced_AdvMelanoma_Orals.csv file: {e}")
 
                 # Process progression data
                 if progression_path is not None:
@@ -985,7 +988,25 @@ class DataProcessorMelanoma:
                         )
                         patient_last_dates.append(df_progression_max)
                     except Exception as e:
-                        logging.error(f"Error reading Enhanced_AdvUrothelial_Progression.csv file: {e}")
+                        logging.error(f"Error reading Enhanced_AdvMelanoma_Progression.csv file: {e}")
+
+                # Process metastatic site data 
+                if metastatic_sites_path is not None:
+                    try: 
+                        df_mets = pd.read_csv(metastatic_sites_path)
+                        df_mets['DateOfMetastasis'] = pd.to_datetime(df_mets['DateOfMetastasis'])
+
+                        df_mets_max = (
+                            df_mets
+                            .query("PatientID in @index_date_df.PatientID")
+                            .groupby('PatientID')['DateOfMetastasis']
+                            .max()
+                            .to_frame(name='last_met_date')
+                            .reset_index()
+                        )
+                        patient_last_dates.append(df_mets_max)
+                    except Exception as e:
+                        logging.error(f"Error reading Enhanced_AdvMelanoma_SitesOfMet.csv file: {e}")
 
                 # Combine all last activity dates
                 if patient_last_dates:
@@ -1045,12 +1066,12 @@ class DataProcessorMelanoma:
                            days_before: Optional[int] = None,
                            days_after: int = 0) -> Optional[pd.DataFrame]:
         """
-        Processes Enhanced_AdvUrothelialBiomarkers.csv by determining FGFR and PDL1 status for each patient within a specified time window relative to an index date
+        Processes Enhanced_AdvMelanomaBiomarkers.csv by determining FGFR and PDL1 status for each patient within a specified time window relative to an index date
 
         Parameters
         ----------
         file_path : str
-            Path to Enhanced_AdvUrothelialBiomarkers.csv file
+            Path to Enhanced_AdvMelanomaBiomarkers.csv file
         index_date_df : pd.DataFrame
             DataFrame containing unique PatientIDs and their corresponding index dates. Only biomarker data for PatientIDs present in this DataFrame will be processed
         index_date_column : str
@@ -1116,7 +1137,7 @@ class DataProcessorMelanoma:
 
         try:
             df = pd.read_csv(file_path)
-            logging.info(f"Successfully read Enhanced_AdvUrothelialBiomarkers.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+            logging.info(f"Successfully read Enhanced_AdvMelanomaBiomarkers.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
 
             df['ResultDate'] = pd.to_datetime(df['ResultDate'])
             df['SpecimenReceivedDate'] = pd.to_datetime(df['SpecimenReceivedDate'])
@@ -1134,7 +1155,7 @@ class DataProcessorMelanoma:
                  on = 'PatientID',
                  how = 'left'
             )
-            logging.info(f"Successfully merged Enhanced_AdvUrothelialBiomarkers.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+            logging.info(f"Successfully merged Enhanced_AdvMelanomaBiomarkers.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
             
             # Create new variable 'index_to_result' that notes difference in days between resulted specimen and index date
             df['index_to_result'] = (df['ResultDate'] - df[index_date_column]).dt.days
@@ -1215,12 +1236,12 @@ class DataProcessorMelanoma:
                 duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
                 logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
 
-            logging.info(f"Successfully processed Enhanced_AdvUrothelialBiomarkers.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
+            logging.info(f"Successfully processed Enhanced_AdvMelanomaBiomarkers.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
             self.biomarkers_df = final_df
             return final_df
 
         except Exception as e:
-            logging.error(f"Error processing Enhanced_AdvUrothelialBiomarkers.csv file: {e}")
+            logging.error(f"Error processing Enhanced_AdvMelanomaBiomarkers.csv file: {e}")
             return None
         
     def process_ecog(self,
