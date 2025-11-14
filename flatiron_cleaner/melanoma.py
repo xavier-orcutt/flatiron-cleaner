@@ -172,7 +172,8 @@ class DataProcessorMelanoma:
         'total_bilirubin': ['42719-5', '1975-2'],
         'ast': ['1920-8', '30239-8'],
         'alt': ['1742-6', '1743-4', '1744-2'],
-        'alp': ['6768-6']
+        'alp': ['6768-6'],
+        'ldh': ['2532-0', '14804-9']
     }
 
     ICD_9_EXLIXHAUSER_MAPPING = {
@@ -1813,7 +1814,7 @@ class DataProcessorMelanoma:
                      days_after: int = 0,
                      summary_lookback: int = 180) -> Optional[pd.DataFrame]:
         """
-        Processes Lab.csv to determine patient lab values within a specified time window relative to an index date. Returns CBC and CMP values 
+        Processes Lab.csv to determine patient lab values within a specified time window relative to an index date. Returns CBC, CMP, and LDH values 
         nearest to index date, along with summary statistics (max, min, standard deviation, and slope) calculated over the summary period. 
         Additional lab tests can be included by providing corresponding LOINC code mappings.
 
@@ -1859,6 +1860,7 @@ class DataProcessorMelanoma:
             - alt : float, U/L
             - total_bilirubin : float, mg/dL
             - albumin : float, g/L
+            - ldh : float, U/L
 
             Summary statistics (calculated over period from index_date - summary_lookback to index_date + days_after):
             For each lab above, includes:
@@ -2109,6 +2111,13 @@ class DataProcessorMelanoma:
             df.loc[mask, 'TestResultCleaned'] = (
                 pd.to_numeric(df.loc[mask, 'TestResult'].str.replace(r'[LH<>]', '', regex=True).str.strip(), errors='coerce')
                 .where(lambda x: (x >= 0) & (x <= 40))
+            )
+
+            # LDH: Convert to TestResult to numeric after removing L, H, <, and >; filter for ranges from 50-5000; and impute to TestResultCleaned
+            mask = df.query('lab_name == "ldh" and TestResultCleaned.isna() and TestResult.notna()').index
+            df.loc[mask, 'TestResultCleaned'] = (
+                pd.to_numeric(df.loc[mask, 'TestResult'].str.replace(r'[LH<>]', '', regex=True).str.strip(), errors='coerce')
+                .where(lambda x: (x >= 50) & (x <= 5000))
             )
             
             # Albumin
