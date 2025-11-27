@@ -392,7 +392,7 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             Column name in index_date_df containing the index date
         drop_stages : bool, default=True
             If True, drops original staging columns (GroupStage, TStage, NStage, and MStage) after creating modified versions
-        drop_surgery_type : bool, default=True
+        drop_surgery : bool, default=True
             If True, drops original Surgery and SurgeryType after creating modified version
         drop_dates : bool, default=True
             If True, drops date columns (DiagnosisDate, AdvancedDiagnosisDate, and SurgeryDate) after calculating durations
@@ -493,7 +493,7 @@ class DataProcessorUrothelial(DataProcessorGeneral):
                 df = df.drop(columns=['GroupStage', 'TStage', 'NStage', 'MStage'])
 
             # Convert date columns
-            date_cols = ['DiagnosisDate', 'AdvancedDiagnosisDate', 'SurgeryDate']
+            date_cols = ['DiagnosisDate', 'AdvancedDiagnosisDate', 'SurgeryDate', index_date_column]
             for col in date_cols:
                 df[col] = pd.to_datetime(df[col])
             
