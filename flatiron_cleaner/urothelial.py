@@ -373,9 +373,10 @@ class DataProcessorUrothelial(DataProcessorGeneral):
 
     def process_enhanced(self,
                          file_path: str,
-                         patient_ids: list = None,
+                         index_date_df: pd.DataFrame,
+                         index_date_column: str,
                          drop_stages: bool = True, 
-                         drop_surgery_type: bool = True,
+                         drop_surgery: bool = True,
                          drop_dates: bool = True) -> Optional[pd.DataFrame]: 
         """
         Processes Enhanced_AdvUrothelial.csv to standardize categories, consolidate 
@@ -385,12 +386,14 @@ class DataProcessorUrothelial(DataProcessorGeneral):
         ----------
         file_path : str
             Path to Enhanced_AdvUrothelial.csv file
-        patient_ids : list, optional
-            List of PatientIDs to process. If None, processes all patients
+        index_date_df : pd.DataFrame
+            DataFrame containing unique PatientIDs and their corresponding index dates. Only mortality data for PatientIDs present in this DataFrame will be processed
+        index_date_column : str
+            Column name in index_date_df containing the index date
         drop_stages : bool, default=True
             If True, drops original staging columns (GroupStage, TStage, NStage, and MStage) after creating modified versions
         drop_surgery_type : bool, default=True
-            If True, drops original surgery type after creating modified version
+            If True, drops original Surgery and SurgeryType after creating modified version
         drop_dates : bool, default=True
             If True, drops date columns (DiagnosisDate, AdvancedDiagnosisDate, and SurgeryDate) after calculating durations
 
@@ -403,10 +406,10 @@ class DataProcessorUrothelial(DataProcessorGeneral):
                 anatomical site of cancer
             - SmokingStatus : category
                 smoking history
-            - Surgery : Int64
-                binary indicator (0/1) for whether patient had surgery
+            - Surgery_mod : Int64
+                binary indicator (0/1) for whether patient had surgery prior to index date 
             - SurgeryType_mod : category
-                consolidated surgery type
+                consolidated surgery type (bladder, upper, other, unknown); set to 'unknown' if surgery occurred after index date
             - DiseaseGrade : category
                 tumor grade (high, low, and unknown) at time of first diagnosis
             - GroupStage_mod : category
@@ -421,8 +424,6 @@ class DataProcessorUrothelial(DataProcessorGeneral):
                 days from first diagnosis to advanced disease 
             - adv_diagnosis_year : category
                 year of advanced diagnosis 
-            - days_diagnosis_to_surgery : float
-                days from first diagnosis to surgery 
             
             Original staging and date columns retained if respective drop_* = False
 
@@ -432,30 +433,43 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             - Ta and Tis : 'nmibc' (Non-muscle invasive disease)
             - T0, TX, Unknown/not documented : 'other' 
 
-        If days_diagnosis_to_surgery is < 0, the value is set to 0; otherwise, the value is left as is. 
-        Cases where days_diagnosis_to_surgery is < 0 occur when the date of surgery is set to the first of the year 
-        and likely reflects uknown exact date of surgery. By setting these cases to 0, we'll presume that the 
-        surgery date occurred on the diagnosis date. 
-
         Output handling:
         - Duplicate PatientIDs are logged as warnings if found but reatained in output
         - Processed DataFrame is stored in self.enhanced_df
         """
         # Input validation
-        if patient_ids is not None:
-            if not isinstance(patient_ids, list):
-                raise TypeError("patient_ids must be a list or None")
+        if not isinstance(index_date_df, pd.DataFrame):
+            raise ValueError("index_date_df must be a pandas DataFrame")
+        if 'PatientID' not in index_date_df.columns:
+            raise ValueError("index_date_df must contain a 'PatientID' column")
+        if not index_date_column or index_date_column not in index_date_df.columns:
+            raise ValueError('index_date_column not found in index_date_df')
+        if index_date_df['PatientID'].duplicated().any():
+            raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
+        
+        index_date_df = index_date_df.copy()
+        # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
+        for col in index_date_df.columns:
+            if col != 'PatientID':  # Keep PatientID unchanged for merging
+                index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
+
+        # Update index_date_column name
+        index_date_column = f'imported_{index_date_column}'
             
         try:
             df = pd.read_csv(file_path)
             logging.info(f"Successfully read Enhanced_AdvUrothelial.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
 
-            # Filter for specific PatientIDs if provided
-            if patient_ids is not None:
-                logging.info(f"Filtering for {len(patient_ids)} specific PatientIDs")
-                df = df[df['PatientID'].isin(patient_ids)]
-                logging.info(f"Successfully filtered Enhanced_AdvUrothelial.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
-        
+            # Select PatientIDs that are included in the index_date_df the merge on 'left'
+            df = df[df.PatientID.isin(index_date_df.PatientID)]
+            df = pd.merge(
+                 df,
+                 index_date_df[['PatientID', index_date_column]],
+                 on = 'PatientID',
+                 how = 'left'
+            )
+            logging.info(f"Successfully filtered Enhanced_AdvUrothelial.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
             # Convert categorical columns
             categorical_cols = ['PrimarySite', 
                                 'DiseaseGrade',
@@ -478,31 +492,33 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             if drop_stages:
                 df = df.drop(columns=['GroupStage', 'TStage', 'NStage', 'MStage'])
 
-            # Recode surgery type variable using class-level mapping and create new column
-            df['SurgeryType_mod'] = df['SurgeryType'].map(self.SURGERY_TYPE_MAPPING).astype('category')
-
-            # Drop original surgery type variable if specified
-            if drop_surgery_type:
-                df = df.drop(columns=['SurgeryType'])
-
             # Convert date columns
             date_cols = ['DiagnosisDate', 'AdvancedDiagnosisDate', 'SurgeryDate']
             for col in date_cols:
                 df[col] = pd.to_datetime(df[col])
             
-            # Convert boolean column to binary (0/1)
+            # Convert boolean column to binary (0/1) ensuring 
             df['Surgery'] = df['Surgery'].astype('Int64')
+            df['Surgery_mod'] = np.where(df['SurgeryDate'] <= df[index_date_column], df['Surgery'], 0)
+
+            # Recode surgery type variable using class-level mapping and create new column
+            df['SurgeryType_mod'] = df['SurgeryType'].map(self.SURGERY_TYPE_MAPPING)
+            df['SurgeryType_mod'] = np.where(df['SurgeryDate'] <= df[index_date_column], df['SurgeryType_mod'], 'unknown')
+            df['SurgeryType_mod'] = df['SurgeryType_mod'].astype('category')
+
+            # Drop original surgery and surgery type variable if specified
+            if drop_surgery:
+                df = df.drop(columns=['Surgery', 'SurgeryType'])
 
             # Generate new variables 
             df['days_diagnosis_to_adv'] = (df['AdvancedDiagnosisDate'] - df['DiagnosisDate']).dt.days
             df['adv_diagnosis_year'] = pd.Categorical(df['AdvancedDiagnosisDate'].dt.year)
-            df['days_diagnosis_to_surgery'] = (df['SurgeryDate'] - df['DiagnosisDate']).dt.days
-            
-            # For those with value <0, set to 0; otherwise, leave as is
-            df['days_diagnosis_to_surgery'] = np.where(df['days_diagnosis_to_surgery'] < 0, 0, df['days_diagnosis_to_surgery'])
     
             if drop_dates:
-                df = df.drop(columns = ['AdvancedDiagnosisDate', 'DiagnosisDate', 'SurgeryDate'])
+                df = df.drop(columns = ['AdvancedDiagnosisDate', 
+                                        'DiagnosisDate', 
+                                        'SurgeryDate', 
+                                        index_date_column])
 
             # Check for duplicate PatientIDs
             if len(df) > df['PatientID'].nunique():
