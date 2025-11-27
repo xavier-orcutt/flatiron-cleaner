@@ -81,7 +81,7 @@ class DataProcessorMelanoma(DataProcessorGeneral):
         'R1 Microscopic residual tumor': 'R1',
         'No Procedure': 'no_procedure',
         'R0 No residual tumor': 'R0',
-        'R status unknown / not specified': 'Unknown'
+        'R status unknown / not specified': 'unknown'
     }
 
     PDL1_PERCENT_STAINING_MAPPING = {
@@ -393,7 +393,8 @@ class DataProcessorMelanoma(DataProcessorGeneral):
 
     def process_enhanced(self,
                          file_path: str,
-                         patient_ids: list = None,
+                         index_date_df: pd.DataFrame,
+                         index_date_column: str,
                          drop_stages: bool = True, 
                          drop_dates: bool = True,
                          drop_documented: bool = True) -> Optional[pd.DataFrame]: 
@@ -405,17 +406,19 @@ class DataProcessorMelanoma(DataProcessorGeneral):
         ----------
         file_path : str
             Path to Enhanced_AdvancedMelanoma.csv file
-        patient_ids : list, optional
-            List of PatientIDs to process. If None, processes all patients
+        index_date_df : pd.DataFrame
+            DataFrame containing unique PatientIDs and their corresponding index dates. Only mortality data for PatientIDs present in this DataFrame will be processed
+        index_date_column : str
+            Column name in index_date_df containing the index date
         drop_stages : bool, default=True
-            If True, drops original staging columns (GroupStage, TStage, NStage, and MStage) as well as ResidualDiseaseInitialDx and ResidualDiseaseLocalRecur 
+            If True, drops original staging columns (GroupStage, TStage, NStage, and MStage) as well as ResidualDiseaseInitialDx, ResidualDiseaseLocalRecur, and CalcResectLocalRecur
             after creating their corresponding modified versions 
         drop_dates : bool, default=True
             If True, drops date columns (DiagnosisDate, AdvancedDiagnosisDate, MetDiagnosisDate, FirstLocalRecurDate, FirstDistantRecurDate, 
             FirstVisceralMetDate, and FirstNonVisceralMetDate) after calculating duration-based features
         drop_documented : bool, default=True
             If True, drops DocumentedResectInitialDx and DocumentedResectLocalRecur, which are redundant with the processed variables  
-            CalcResectInitialDx` and `CalcResectLocalRecur
+            CalcResectInitialDx and `CalcResectLocalRecur
             
         Returns
         -------
@@ -425,7 +428,7 @@ class DataProcessorMelanoma(DataProcessorGeneral):
             - GroupStage_mod : category
                 consolidated overall staging (0-IV and unknown) at time of first diagnosis
             - TStage_mod : category
-                consolidated tumor staging (T1-T4, non-muscle invasive bladder cancer [nmibc], other) at time of first diagnosis
+                consolidated tumor staging (T0-T4, unknown) at time of first diagnosis
             - NStage_mod : category
                 consolidated lymph node staging (N0, N1, N2, N3, and unknown) at time of first diagnosis
             - MStage_mod : category
@@ -436,18 +439,17 @@ class DataProcessorMelanoma(DataProcessorGeneral):
                 year of advanced diagnosis 
             - days_diagnosis_to_met : float
                 days from first diagnosis to advanced disease
-            - adv_diagnosis_met : category
-                year of metastatic diagnosis  
-            - days_diagnosis_to_surgery : float
-                days from first diagnosis to surgery
-            - ResidualDiseaseInitialDx_mod : cateogry 
+            - met_diagnosis_year : category
+                year of metastatic diagnosis
+            - ResidualDiseaseInitialDx_mod : category 
                 consolidated surgical pathology variable indicating whether any tumor remained after definitive surgery at initial diagnosis 
-            - CalcResectInitialDx : cateogry
+            - CalcResectInitialDx : category
                 indicating resectability status at initial diagnosis; unchanged from the source dataframe  
             - ResidualDiseaseLocalRecur_mod : category 
-                consolidated surgical pathology variable indicating whether any tumor remained after definitive surgery for a local recurrence
-            - CalcResectLocalRecur : cateogory
-                indicating resectability status at the time of local recurrence; unchanged from the source dataframe. 
+                consolidated surgical pathology variable indicating whether any tumor remained after definitive surgery for a local recurrence; 
+                set to 'unknown' if occurred after index date
+            - CalcResectLocalRecur_mod : category
+                indicating resectability status at the time of local recurrence. Set to 'Unknown' if occurred after index date.  
             
             Original staging, date, and documented columns retained if respective drop_* = False
 
@@ -457,24 +459,51 @@ class DataProcessorMelanoma(DataProcessorGeneral):
         and FirstNonVisceralMetDate. 
 
         Output handling:
-        - Duplicate PatientIDs are logged as warnings if found but reatained in output
+        - Duplicate PatientIDs are logged as warnings if found but retained in output
         - Processed DataFrame is stored in self.enhanced_df
         """
         # Input validation
-        if patient_ids is not None:
-            if not isinstance(patient_ids, list):
-                raise TypeError("patient_ids must be a list or None")
-            
+        if not isinstance(index_date_df, pd.DataFrame):
+            raise ValueError("index_date_df must be a pandas DataFrame")
+        if 'PatientID' not in index_date_df.columns:
+            raise ValueError("index_date_df must contain a 'PatientID' column")
+        if not index_date_column or index_date_column not in index_date_df.columns:
+            raise ValueError('index_date_column not found in index_date_df')
+        if index_date_df['PatientID'].duplicated().any():
+            raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
+        
+        index_date_df = index_date_df.copy()
+        # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
+        for col in index_date_df.columns:
+            if col != 'PatientID':  # Keep PatientID unchanged for merging
+                index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
+
+        # Update index_date_column name
+        index_date_column = f'imported_{index_date_column}'            
         try:
             df = pd.read_csv(file_path)
             logging.info(f"Successfully read Enhanced_AdvancedMelanoma.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
 
-            # Filter for specific PatientIDs if provided
-            if patient_ids is not None:
-                logging.info(f"Filtering for {len(patient_ids)} specific PatientIDs")
-                df = df[df['PatientID'].isin(patient_ids)]
-                logging.info(f"Successfully filtered Enhanced_AdvancedMelanoma.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+           # Select PatientIDs that are included in the index_date_df the merge on 'left'
+            df = df[df.PatientID.isin(index_date_df.PatientID)]
+            df = pd.merge(
+                 df,
+                 index_date_df[['PatientID', index_date_column]],
+                 on = 'PatientID',
+                 how = 'left'
+            )
+            logging.info(f"Successfully filtered Enhanced_AdvancedMelanoma.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
         
+                        # Convert date columns
+            date_cols = ['DiagnosisDate', 
+                         'AdvancedDiagnosisDate',
+                         'MetDiagnosisDate', 
+                         'FirstLocalRecurDate', 
+                         index_date_column]
+            
+            for col in date_cols:
+                df[col] = pd.to_datetime(df[col])
+
             # Convert categorical columns
             categorical_cols = ['TStage', 
                                 'NStage',
@@ -495,7 +524,13 @@ class DataProcessorMelanoma(DataProcessorGeneral):
             df['MStage_mod'] = df['MStage'].map(self.M_STAGE_MAPPING).astype('category')
             df['GroupStage_mod'] = df['GroupStage'].map(self.GROUP_STAGE_MAPPING).astype('category')
             df['ResidualDiseaseInitialDx_mod'] = df['ResidualDiseaseInitialDx'].map(self.RESIDUAL_DISEASE_MAPPING).astype('category')
+            
             df['ResidualDiseaseLocalRecur_mod'] = df['ResidualDiseaseLocalRecur'].map(self.RESIDUAL_DISEASE_MAPPING).astype('category')
+            df['ResidualDiseaseLocalRecur_mod'] = np.where(df['FirstLocalRecurDate'] <= df[index_date_column], df['ResidualDiseaseLocalRecur_mod'], 'unknown')
+            df['ResidualDiseaseLocalRecur_mod'] = df['ResidualDiseaseLocalRecur_mod'].astype('category')    
+
+            df['CalcResectLocalRecur_mod'] = np.where(df['FirstLocalRecurDate'] <= df[index_date_column], df['CalcResectLocalRecur'], 'Unknown')
+            df['CalcResectLocalRecur_mod'] = df['CalcResectLocalRecur_mod'].astype('category')  
 
             # Drop original stage variables if specified
             if drop_stages:
@@ -504,17 +539,11 @@ class DataProcessorMelanoma(DataProcessorGeneral):
                                       'MStage', 
                                       'GroupStage',
                                       'ResidualDiseaseInitialDx',
-                                      'ResidualDiseaseLocalRecur'])
+                                      'ResidualDiseaseLocalRecur',
+                                      'CalcResectLocalRecur'])
                 
             if drop_documented:
                 df = df.drop(columns = ['DocumentedResectInitialDx', 'DocumentedResectLocalRecur'])
-
-            # Convert date columns
-            date_cols = ['DiagnosisDate', 
-                         'AdvancedDiagnosisDate',
-                         'MetDiagnosisDate']
-            for col in date_cols:
-                df[col] = pd.to_datetime(df[col])
 
             # Generate new variables 
             df['days_diagnosis_to_adv'] = (df['AdvancedDiagnosisDate'] - df['DiagnosisDate']).dt.days
@@ -529,7 +558,8 @@ class DataProcessorMelanoma(DataProcessorGeneral):
                                         'FirstLocalRecurDate',
                                         'FirstDistantRecurDate',
                                         'FirstVisceralMetDate',
-                                        'FirstNonVisceralMetDate'])
+                                        'FirstNonVisceralMetDate',
+                                        index_date_column])
 
             # Check for duplicate PatientIDs
             if len(df) > df['PatientID'].nunique():
