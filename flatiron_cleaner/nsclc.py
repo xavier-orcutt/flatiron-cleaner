@@ -46,7 +46,6 @@ class DataProcessorNSCLC(DataProcessorGeneral):
     }
 
     PDL1_PERCENT_STAINING_MAPPING = {
-        np.nan: 0,
         '0%': 1, 
         '< 1%': 2,
         '1%': 3, 
