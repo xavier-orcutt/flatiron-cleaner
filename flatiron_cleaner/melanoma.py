@@ -85,7 +85,6 @@ class DataProcessorMelanoma(DataProcessorGeneral):
     }
 
     PDL1_PERCENT_STAINING_MAPPING = {
-        np.nan: 0,
         '0%': 1, 
         '< 1%': 2,
         '1%': 3, 
@@ -494,7 +493,7 @@ class DataProcessorMelanoma(DataProcessorGeneral):
             )
             logging.info(f"Successfully filtered Enhanced_AdvancedMelanoma.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
         
-                        # Convert date columns
+            # Convert date columns
             date_cols = ['DiagnosisDate', 
                          'AdvancedDiagnosisDate',
                          'MetDiagnosisDate', 
