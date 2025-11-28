@@ -9,6 +9,8 @@ Key features of the package include:
 - Standardizing data cleaning around a user-specified index date, such as metastatic diagnosis or treatment initiation
 - Engineering clinically relevant variables for analysis
 
+**Note:** This package is under active development and serves as a starting framework for cleaning Flatiron Health datasets. Users are encouraged to review and customize the processing logic for their specific research needs.
+
 ## Installation
 
 Built and tested in python 3.13 on Flatiron datacuts prior to 2021. 
@@ -33,6 +35,7 @@ The following cancers have their own dedicated data processor class:
 | Metastatic Prostate Cancer | `DataProcessorProstate` |
 | Metastatic Renal Cell Cancer | `DataProcessorRenal` |
 | Advanced Melanoma | `DataProcessorMelanoma` |
+| Advanced Head and Neck | `DataProcessorHeadNeck`|
 
 ### General Processor 
 
