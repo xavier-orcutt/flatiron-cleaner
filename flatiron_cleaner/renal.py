@@ -320,7 +320,9 @@ class DataProcessorRenal(DataProcessorGeneral):
 
     def process_enhanced(self,
                          file_path: str,
-                         patient_ids: list = None,
+                         index_date_df: pd.DataFrame,
+                         index_date_column: str,
+                         drop_surgery = True,
                          drop_dates: bool = True) -> Optional[pd.DataFrame]: 
         """
         Processes Enhanced_MetastaticRCC.csv to standardize categories, consolidate staging information, and calculate time-based metrics between key clinical events.
@@ -329,8 +331,12 @@ class DataProcessorRenal(DataProcessorGeneral):
         ----------
         file_path : str
             Path to Enhanced_MetastaticRCC.csv file
-        patient_ids : list, optional
-            List of PatientIDs to process. If None, processes all patients
+        index_date_df : pd.DataFrame
+            DataFrame containing unique PatientIDs and their corresponding index dates. Only mortality data for PatientIDs present in this DataFrame will be processed
+        index_date_column : str
+            Column name in index_date_df containing the index date
+        drop_surgery : bool, default=True
+            If True, drops original Nephrectomy and NephrectomyType after creating modified version
         drop_dates : bool, default=True
             If True, drops date columns (DiagnosisDate and MetDiagnosisDate) after calculating durations
 
@@ -346,10 +352,10 @@ class DataProcessorRenal(DataProcessorGeneral):
                 histology type 
             - SmokingStatus: category
                 smoking history 
-            - Nephrectomy : Int64
-                binary indicator (0/1) for whether patient had surgery
+            - Nephrectomy_mod : Int64
+                binary indicator (0/1) for whether patient had nephrectomy prior to index date
             - NephrectomyType : category
-                type of nephrectomry 
+                type of nephrectomy; set to 'Unknown' if surgery occurred after index date 
             - days_diagnosis_to_met : float
                 days from first diagnosis to metastatic disease 
             - met_diagnosis_year : category
@@ -361,30 +367,51 @@ class DataProcessorRenal(DataProcessorGeneral):
 
         Notes
         -----
-        If days_diagnosis_to_surgery is < 0, the value is set to 0; otherwise, the value is left as is. 
-        Cases where days_diagnosis_to_surgery is < 0 occur when the date of surgery is set to the first of the year 
-        and likely reflects uknown exact date of surgery. By setting these cases to 0, we'll presume that the 
-        surgery date occurred on the diagnosis date. 
-        
         Output handling: 
         - Duplicate PatientIDs are logged as warnings if found but retained in output
         - Processed DataFrame is stored in self.enhanced_df
         """
-        # Input validation
-        if patient_ids is not None:
-            if not isinstance(patient_ids, list):
-                raise TypeError("patient_ids must be a list or None")
+         # Input validation
+        if not isinstance(index_date_df, pd.DataFrame):
+            raise ValueError("index_date_df must be a pandas DataFrame")
+        if 'PatientID' not in index_date_df.columns:
+            raise ValueError("index_date_df must contain a 'PatientID' column")
+        if not index_date_column or index_date_column not in index_date_df.columns:
+            raise ValueError('index_date_column not found in index_date_df')
+        if index_date_df['PatientID'].duplicated().any():
+            raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
         
+        index_date_df = index_date_df.copy()
+        # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
+        for col in index_date_df.columns:
+            if col != 'PatientID':  # Keep PatientID unchanged for merging
+                index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
+
+        # Update index_date_column name
+        index_date_column = f'imported_{index_date_column}'
+            
         try:
             df = pd.read_csv(file_path)
             logging.info(f"Successfully read Enhanced_MetastaticRCC.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
 
-            # Filter for specific PatientIDs if provided
-            if patient_ids is not None:
-                logging.info(f"Filtering for {len(patient_ids)} specific PatientIDs")
-                df = df[df['PatientID'].isin(patient_ids)]
-                logging.info(f"Successfully filtered Enhanced_MetastaticRCC.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
-        
+            # Select PatientIDs that are included in the index_date_df the merge on 'left'
+            df = df[df.PatientID.isin(index_date_df.PatientID)]
+            df = pd.merge(
+                 df,
+                 index_date_df[['PatientID', index_date_column]],
+                 on = 'PatientID',
+                 how = 'left'
+            )
+            logging.info(f"Successfully filtered Enhanced_MetastaticRCC.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
+            # Convert date columns
+            date_cols = ['DiagnosisDate', 
+                         'MetDiagnosisDate', 
+                         'NephrectomyDate',
+                         index_date_column]
+            for col in date_cols:
+                df[col] = pd.to_datetime(df[col])
+
             # Convert categorical columns
             categorical_cols = ['GroupStage', 
                                 'StageFourDetail', 
@@ -393,24 +420,27 @@ class DataProcessorRenal(DataProcessorGeneral):
                                 'NephrectomyType']
             df[categorical_cols] = df[categorical_cols].astype('category')
 
-            # Convert boolean column to binary (0/1)
+            # Convert boolean column to binary (0/1) 
             df['Nephrectomy'] = df['Nephrectomy'].astype('Int64')
+            df['Nephrectomy_mod'] = np.where(df['NephrectomyDate'] <= df[index_date_column], df['Nephrectomy'], 0)
 
-            # Convert date columns
-            date_cols = ['DiagnosisDate', 'MetDiagnosisDate', 'NephrectomyDate']
-            for col in date_cols:
-                df[col] = pd.to_datetime(df[col])
+            # Recode surgery type variable using class-level mapping and create new column
+            df['NephrectomyType_mod'] = np.where(df['NephrectomyDate'] <= df[index_date_column], df['NephrectomyType'], 'Unknown')
+            df['NephrectomyType_mod'] = df['NephrectomyType_mod'].astype('category')
+
+            # Drop original nephrectomy and nephrectomy type variable if specified
+            if drop_surgery:
+                df = df.drop(columns=['Nephrectomy', 'NephrectomyType'])
 
             # Generate new variables 
             df['days_diagnosis_to_met'] = (df['MetDiagnosisDate'] - df['DiagnosisDate']).dt.days
             df['met_diagnosis_year'] = pd.Categorical(df['MetDiagnosisDate'].dt.year)
-            df['days_diagnosis_to_surgery'] = (df['NephrectomyDate'] - df['DiagnosisDate']).dt.days
-
-            # For those with value <0, set to 0; otherwise, leave as is
-            df['days_diagnosis_to_surgery'] = np.where(df['days_diagnosis_to_surgery'] < 0, 0, df['days_diagnosis_to_surgery'])
-    
+            
             if drop_dates:
-                df = df.drop(columns = ['MetDiagnosisDate', 'DiagnosisDate', 'NephrectomyDate'])
+                df = df.drop(columns = ['MetDiagnosisDate', 
+                                        'DiagnosisDate', 
+                                        'NephrectomyDate',
+                                        index_date_column])
 
             # Check for duplicate PatientIDs
             if len(df) > df['PatientID'].nunique():
