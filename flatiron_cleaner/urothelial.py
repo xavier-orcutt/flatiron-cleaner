@@ -496,7 +496,7 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             for col in date_cols:
                 df[col] = pd.to_datetime(df[col])
             
-            # Convert boolean column to binary (0/1) ensuring 
+            # Convert boolean column to binary (0/1) 
             df['Surgery'] = df['Surgery'].astype('Int64')
             df['Surgery_mod'] = np.where(df['SurgeryDate'] <= df[index_date_column], df['Surgery'], 0)
 
