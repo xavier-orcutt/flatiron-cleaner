@@ -1300,6 +1300,8 @@ class DataProcessorGeneral:
             - EndDate falls on or after the start of the time window 
 
         Date filtering:
+        - StartDate and EndDate are parsed using pandas datetime conversion with invalid
+        or out-of-bounds values coerced to missing (NaT).
         - Records with StartDate or EndDate before 1900-01-01 are excluded to prevent integer overflow issues
         when calculating date differences. This is a data quality measure as extremely old dates are likely
         erroneous and can cause numerical problems in pandas datetime calculations.
@@ -1361,8 +1363,8 @@ class DataProcessorGeneral:
             df = pd.read_csv(file_path)
             logging.info(f"Successfully read Insurance.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
 
-            df['StartDate'] = pd.to_datetime(df['StartDate'])
-            df['EndDate'] = pd.to_datetime(df['EndDate'])
+            df['StartDate'] = pd.to_datetime(df['StartDate'], errors = 'coerce')
+            df['EndDate'] = pd.to_datetime(df['EndDate'], errors = 'coerce')
 
             both_dates_missing = df['StartDate'].isna() & df['EndDate'].isna()
             start_date_missing = df['StartDate'].isna()
