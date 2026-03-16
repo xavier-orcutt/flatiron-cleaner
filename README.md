@@ -9,11 +9,11 @@ Key features of the package include:
 - Standardizing data cleaning around a user-specified index date, such as metastatic diagnosis or treatment initiation
 - Engineering clinically relevant variables for analysis
 
-**Note:** This package is under active development and serves as a starting framework for cleaning Flatiron Health datasets. Users are encouraged to review and customize the processing logic for their specific research needs.
+**Note:** This package is under active development and serves as a starting framework for cleaning Flatiron Health datasets. Flatiron data structures may vary across different datacuts, including changes in column names, coding conventions, or unexpected values. While the package attempts to handle common variations, users should review the processing logic and adapt it as needed for their specific datacut and research question.
 
 ## Installation
 
-Built and tested in python 3.13 on Flatiron datacuts prior to 2021. 
+Built and tested in python 3.13. 
 
 ```python
 pip install flatiron-cleaner 
