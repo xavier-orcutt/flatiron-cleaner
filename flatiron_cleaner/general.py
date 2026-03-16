@@ -641,6 +641,10 @@ class DataProcessorGeneral:
         Notes
         -----
         Data cleaning and processing: 
+        - Sex variable harmonization:
+            - Handles both older and newer versions of the dataset
+            - If a column named 'BirthSex' is present and 'Gender' is absent, it is renamed to 'Gender'
+            - This allows the method to process datasets that use either naming convention
         - Imputation for Race and Ethnicity:
             - If Race='Hispanic or Latino', Race value is replaced with NaN
             - If Race='Hispanic or Latino' and Ethnicity is missing, Ethnicity is set to 'Hispanic or Latino'
@@ -674,6 +678,12 @@ class DataProcessorGeneral:
         try:
             df = pd.read_csv(file_path)
             logging.info(f"Successfully read Demographics.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
+            # Handle old vs new schema: BirthSex -> Gender
+            if 'Gender' not in df.columns and 'BirthSex' in df.columns:
+                df = df.rename(columns={'BirthSex': 'Gender'})
+            elif 'Gender' not in df.columns and 'BirthSex' not in df.columns:
+                raise ValueError("Demographics.csv must contain either 'Gender' or 'BirthSex'")
 
             # Initial data type conversions
             df['BirthYear'] = df['BirthYear'].astype('Int64')
