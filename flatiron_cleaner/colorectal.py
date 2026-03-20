@@ -1032,7 +1032,9 @@ class DataProcessorColorectal(DataProcessorGeneral):
                           visit_path: str = None, 
                           telemedicine_path: str = None, 
                           biomarkers_path: str = None, 
+                          her2_path: str = None,
                           oral_path: str = None,
+                          progression_path: str = None,
                           drop_dates: bool = True) -> Optional[pd.DataFrame]:
         """
         Processes Enhanced_Mortality_V2.csv by cleaning data types, calculating time from index date to death/censor, and determining mortality events. 
@@ -1051,8 +1053,12 @@ class DataProcessorColorectal(DataProcessorGeneral):
             Path to Telemedicine.csv file, using VisitDate to determine last EHR activity date for censored patients
         biomarkers_path : str
             Path to Enhanced_MetCRCBiomarkers.csv file, using SpecimenCollectedDate to determine last EHR activity date for censored patients
+        her2_path : str
+            Path to Enhanced_CRC_HER2.csv file, using SpecimenCollectedDate to determine last EHR activity date for censored patients
         oral_path : str
             Path to Enhanced_MetCRC_Orals.csv file, using StartDate and EndDate to determine last EHR activity date for censored patients
+        progression_path : str
+            Path to Enhanced_MetCRC_Progression.csv file, using ProgressionDate and LastClinicNoteDate to determine last EHR activity date for censored patients
         drop_dates : bool, default = True
             If True, drops date columns (index_date_column, DateOfDeath, last_ehr_date)   
         
@@ -1087,7 +1093,7 @@ class DataProcessorColorectal(DataProcessorGeneral):
         Censoring logic:
         - Patients without death dates are censored at their last EHR activity
         - Last EHR activity is determined as the maximum date across all provided
-          supplementary files (visit, telemedicine, biomarkers, or oral)
+          supplementary files (visit, telemedicine, biomarkers, her2, oral, or progression)
         - If no supplementary files are provided or a patient has no activity in 
           supplementary files, duration may be null for censored patients
         
@@ -1146,8 +1152,8 @@ class DataProcessorColorectal(DataProcessorGeneral):
             patient_last_dates = []
 
             # Determine last EHR data
-            if all(path is None for path in [visit_path, telemedicine_path, biomarkers_path, oral_path]):
-                logging.info("WARNING: At least one of visit_path, telemedicine_path, biomarkers_path, or oral_path must be provided to calculate duration for those with a missing death date")
+            if all(path is None for path in [visit_path, telemedicine_path, biomarkers_path, her2_path, oral_path, progression_path]):
+                logging.info("WARNING: At least one of visit_path, telemedicine_path, biomarkers_path, her2_path, oral_path, or progression_path must be provided to calculate duration for those with a missing death date")
             else: 
                 # Process visit and telemedicine data
                 if visit_path is not None or telemedicine_path is not None:
@@ -1195,6 +1201,24 @@ class DataProcessorColorectal(DataProcessorGeneral):
                     except Exception as e:
                         logging.error(f"Error reading Enhanced_MetCRCBiomarkers.csv file: {e}")
 
+                # Process her2 data
+                if her2_path is not None:
+                    try: 
+                        df_her2 = pd.read_csv(her2_path)
+                        df_her2['SpecimenCollectedDate'] = pd.to_datetime(df_her2['SpecimenCollectedDate'])
+
+                        df_her2_max = (
+                            df_her2
+                            .query("PatientID in @index_date_df.PatientID")
+                            .groupby('PatientID')['SpecimenCollectedDate']
+                            .max()
+                            .to_frame(name='last_her2_date')
+                            .reset_index()
+                        )
+                        patient_last_dates.append(df_her2_max)
+                    except Exception as e:
+                        logging.error(f"Error reading Enhanced_CRC_HER2.csv file: {e}")
+
                 # Process oral medication data
                 if oral_path is not None:
                     try:
@@ -1214,6 +1238,26 @@ class DataProcessorColorectal(DataProcessorGeneral):
                         patient_last_dates.append(df_oral_max)
                     except Exception as e:
                         logging.error(f"Error reading Enhanced_MetCRC_Orals.csv file: {e}")
+                
+                # Process progression data
+                if progression_path is not None:
+                    try: 
+                        df_progression = pd.read_csv(progression_path)
+                        df_progression['ProgressionDate'] = pd.to_datetime(df_progression['ProgressionDate'])
+                        df_progression['LastClinicNoteDate'] = pd.to_datetime(df_progression['LastClinicNoteDate'])
+
+                        df_progression_max = (
+                            df_progression
+                            .query("PatientID in @index_date_df.PatientID")
+                            .assign(max_date=lambda x: x[['ProgressionDate', 'LastClinicNoteDate']].max(axis=1))
+                            .groupby('PatientID')['max_date']
+                            .max()
+                            .to_frame(name='last_progression_date')
+                            .reset_index()
+                        )
+                        patient_last_dates.append(df_progression_max)
+                    except Exception as e:
+                        logging.error(f"Error reading Enhanced_AdvUrothelial_Progression.csv file: {e}")
 
                 # Combine all last activity dates
                 if patient_last_dates:
