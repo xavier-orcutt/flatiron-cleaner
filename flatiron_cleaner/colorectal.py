@@ -39,6 +39,24 @@ class DataProcessorColorectal(DataProcessorGeneral):
         # Unknown
         'Unknown': 'unknown'
     }
+
+    HER2_PERCENT_STAINING_MAPPING = {
+        '0%': 1, 
+        '< 1%': 2,
+        '1%': 3, 
+        '2% - 4%': 4,
+        '5% - 9%': 5,
+        '10% - 19%': 6,  
+        '20% - 29%': 7, 
+        '30% - 39%': 8, 
+        '40% - 49%': 9, 
+        '50% - 59%': 10, 
+        '60% - 69%': 11, 
+        '70% - 79%': 12, 
+        '80% - 89%': 13, 
+        '90% - 99%': 14,
+        '100%': 15
+    }
     
     ICD_9_EXLIXHAUSER_MAPPING = {
         # Congestive heart failure
@@ -314,6 +332,7 @@ class DataProcessorColorectal(DataProcessorGeneral):
         # colorectal-specific attributes 
         self.enhanced_df = None
         self.biomarkers_df = None 
+        self.her2_df = None
         self.diagnosis_df = None 
         self.mortality_df = None
 
@@ -587,6 +606,169 @@ class DataProcessorColorectal(DataProcessorGeneral):
         except Exception as e:
             logging.error(f"Error processing Enhanced_MetCRCBiomarkers.csv file: {e}")
             return None
+        
+    def process_her2(self,
+                     file_path: str,
+                     index_date_df: pd.DataFrame,
+                     index_date_column: str, 
+                     days_before: Optional[int] = None,
+                     days_after: int = 0) -> Optional[pd.DataFrame]:
+        """
+        Processes Enhanced_CRC_HER2.csv by determining HER2 status for each patient within a specified time window relative to an index date. 
+
+        Parameters
+        ----------
+        file_path : str
+            Path to Enhanced_CRC_HER2.csv file
+        index_date_df : pd.DataFrame
+            DataFrame containing unique PatientIDs and their corresponding index dates. Only HER2 data for PatientIDs present in this DataFrame will be processed
+        index_date_column : str
+            Column name in index_date_df containing the index date
+        days_before : int | None, optional
+            Number of days before the index date to include. Must be >= 0 or None. If None, includes all prior results. Default: None
+        days_after : int, optional
+            Number of days after the index date to include. Must be >= 0. Default: 0
+        
+        Returns
+        -------
+        pd.DataFrame or None
+            - PatientID : object
+                unique patient identifier
+            - HER2_status : category
+                positive if ever-positive, negative if only-negative, otherwise unknown
+            - percent_staining : category, ordered 
+                returns a patient's maximum percent staining
+
+        Notes
+        ------
+        Biomarker cleaning and processing: 
+        - HER2 status is classified as:
+            - 'positive' if any test result is positive (ever-positive)
+            - 'negative' if any test is negative without positives (only-negative) 
+            - 'unknown' if all results are indeterminate
+          
+        - Missing HER2 data handling:
+            - All PatientIDs from index_date_df are included in the output
+            - Patients without any HER2 tests will have NaN values for all biomarker columns
+
+        Output handling:     
+        - Duplicate PatientIDs are logged as warnings if found but retained in output
+        - Processed DataFrame is stored in self.her2_df
+        """
+         # Input validation
+        if not isinstance(index_date_df, pd.DataFrame):
+            raise ValueError("index_date_df must be a pandas DataFrame")
+        if 'PatientID' not in index_date_df.columns:
+            raise ValueError("index_date_df must contain a 'PatientID' column")
+        if not index_date_column or index_date_column not in index_date_df.columns:
+            raise ValueError('index_date_column not found in index_date_df')
+        if index_date_df['PatientID'].duplicated().any():
+            raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
+        
+        if days_before is not None:
+            if not isinstance(days_before, int) or days_before < 0:
+                raise ValueError("days_before must be a non-negative integer or None")
+        if not isinstance(days_after, int) or days_after < 0:
+            raise ValueError("days_after must be a non-negative integer")
+        
+        index_date_df = index_date_df.copy()
+        # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
+        for col in index_date_df.columns:
+            if col != 'PatientID':  # Keep PatientID unchanged for merging
+                index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
+
+        # Update index_date_column name
+        index_date_column = f'imported_{index_date_column}'
+
+        try:
+            df = pd.read_csv(file_path)
+            logging.info(f"Successfully read Enhanced_CRC_HER2.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+
+            df['ResultDate'] = pd.to_datetime(df['ResultDate'])
+
+            index_date_df[index_date_column] = pd.to_datetime(index_date_df[index_date_column])
+
+            # Select PatientIDs that are included in the index_date_df the merge on 'left'
+            df = df[df.PatientID.isin(index_date_df.PatientID)]
+            df = pd.merge(
+                    df,
+                    index_date_df[['PatientID', index_date_column]],
+                    on = 'PatientID',
+                    how = 'left'
+            )
+            logging.info(f"Successfully merged Enhanced_CRC_HER2.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+            
+            # Create new variable 'index_to_result' that notes difference in days between resulted specimen and index date
+            df['index_to_result'] = (df['ResultDate'] - df[index_date_column]).dt.days
+            
+            # Select biomarkers that fall within desired before and after index date
+            if days_before is None:
+                # Only filter for days after
+                df_filtered = df[df['index_to_result'] <= days_after].copy()
+            else:
+                # Filter for both before and after
+                df_filtered = df[
+                    (df['index_to_result'] <= days_after) & 
+                    (df['index_to_result'] >= -days_before)
+                ].copy()
+
+            # Process HER2
+            HER2_df = (
+                df_filtered
+                .groupby('PatientID')['BiomarkerStatus']
+                .agg(lambda x: 'positive' if any('Positive' in val for val in x)
+                    else ('negative' if any('Negative' in val for val in x)
+                        else 'unknown'))
+                .reset_index()
+                .rename(columns={'BiomarkerStatus': f'HER2_status'}) 
+            )
+                
+            # Process HER2 staining 
+            staining_df = (
+                df_filtered
+                .query('BiomarkerStatus == "Positive"')
+                .groupby('PatientID')['PercentStaining']
+                .apply(lambda x: x.map(self.HER2_PERCENT_STAINING_MAPPING))
+                .groupby('PatientID')
+                .agg('max')
+                .to_frame(name = 'her2_ordinal_value')
+                .reset_index()
+            )
+
+            # Create reverse mapping to convert back to percentage strings
+            reverse_staining_dict = {v: k for k, v in self.HER2_PERCENT_STAINING_MAPPING.items()}
+            staining_df['HER2_percent_staining'] = staining_df['her2_ordinal_value'].map(reverse_staining_dict)
+            staining_df = staining_df.drop(columns = ['her2_ordinal_value'])
+
+            # Merge dataframes -- start with index_date_df to ensure all PatientIDs are included
+            final_df = index_date_df[['PatientID']].copy()
+            final_df = pd.merge(final_df, HER2_df, on = 'PatientID', how = 'left')
+            final_df = pd.merge(final_df, staining_df, on = 'PatientID', how = 'left')
+
+            final_df['HER2_status'] = final_df['HER2_status'].astype('category')
+
+            staining_dtype = pd.CategoricalDtype(
+                categories = ['0%', '< 1%', '1%', '2% - 4%', '5% - 9%', '10% - 19%',
+                              '20% - 29%', '30% - 39%', '40% - 49%', '50% - 59%',
+                              '60% - 69%', '70% - 79%', '80% - 89%', '90% - 99%', '100%'],
+                              ordered = True
+            )
+            
+            final_df['HER2_percent_staining'] = final_df['HER2_percent_staining'].astype(staining_dtype)
+
+            # Check for duplicate PatientIDs
+            if len(final_df) > final_df['PatientID'].nunique():
+                duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
+                logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
+
+            logging.info(f"Successfully processed Enhanced_CRC_HER2.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
+            self.her2_df = final_df
+            return final_df
+
+        except Exception as e:
+            logging.error(f"Error processing Enhanced_CRC_HER2.csv file: {e}")
+            return None
+
         
     def process_diagnosis(self, 
                           file_path: str,
