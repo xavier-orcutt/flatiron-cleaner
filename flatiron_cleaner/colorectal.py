@@ -360,6 +360,8 @@ class DataProcessorColorectal(DataProcessorGeneral):
         pd.DataFrame or None
             - PatientID : object
                 unique patient identifier
+            - CrcSite : category
+                site of colorectal cancer (values unchanged; converted to categorical dtype)
             - GroupStage_mod : category
                 consolidated overall staging (0-IV, Unknown) at time of first diagnosis
             - days_diagnosis_to_met : float
@@ -400,6 +402,8 @@ class DataProcessorColorectal(DataProcessorGeneral):
             # Drop original stage variable if specified
             if drop_stage:
                 df = df.drop(columns=['GroupStage'])
+
+            df['CrcSite'] = df['CrcSite'].astype('category')
 
             # Convert date columns
             date_cols = ['DiagnosisDate', 'MetDiagnosisDate']
