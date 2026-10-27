@@ -1545,7 +1545,8 @@ class DataProcessorGeneral:
                      additional_loinc_mappings: dict = None,
                      days_before: int = 90,
                      days_after: int = 0,
-                     summary_lookback: int = 180) -> Optional[pd.DataFrame]:
+                     summary_lookback: int = 180,
+                     return_individual: bool = False) -> Optional[pd.DataFrame]:
         """
         Processes Lab.csv to determine patient lab values within a specified time window relative to an index date. Returns CBC and CMP values 
         nearest to index date, along with summary statistics (max, min, standard deviation, and slope) calculated over the summary period. 
@@ -1573,7 +1574,8 @@ class DataProcessorGeneral:
 
         Returns
         -------
-        pd.DataFrame or None
+        If return_individual is False, returns one row per patient with lab
+        values nearest the index date and summary statistics:
             - PatientID : object
                 unique patient identifier
 
@@ -1601,6 +1603,12 @@ class DataProcessorGeneral:
             - {lab}_min : float, minimum value
             - {lab}_std : float, standard deviation
             - {lab}_slope : float, rate of change over time (days)
+        
+        If return_individual is True, returns one row per cleaned lab result,
+        with PatientID, ResultDate, lab_name, TestResultCleaned, and
+        index_to_lab. Patients without qualifying lab results are not included.
+
+        Returns None if an error occurs during processing.
 
         Notes
         -----
@@ -1874,6 +1882,23 @@ class DataProcessorGeneral:
             # Filter for desired window period for baseline labs after removing missing values after above imputation
             df = df.query('TestResultCleaned.notna()')
             df['index_to_lab'] = (df['ResultDate'] - df[index_date_column]).dt.days
+
+            # Return table in long format
+            if return_individual:
+                return (
+                    df.loc[
+                        df["index_to_lab"].between(-days_before, days_after),
+                        [
+                            "PatientID",
+                            "ResultDate",
+                            "lab_name",
+                            "TestResultCleaned",
+                            "index_to_lab",
+                        ],
+                    ]
+                    .sort_values(["PatientID", "ResultDate"])
+                    .reset_index(drop=True)
+                )
             
             df_lab_index_filtered = df[
                 (df['index_to_lab'] <= days_after) & 
