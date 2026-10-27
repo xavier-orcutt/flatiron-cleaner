@@ -99,6 +99,7 @@ class DataProcessorGeneral:
     LOINC_MAPPINGS = {
         'hemoglobin': ['718-7', '20509-6'],
         'wbc': ['26464-8', '6690-2'],
+        'anc': ['26499-4', '751-8', '753-4'],
         'platelet': ['26515-7', '777-3', '778-1'],
         'creatinine': ['2160-0', '38483-4'],
         'bun': ['3094-0'],
@@ -1579,6 +1580,7 @@ class DataProcessorGeneral:
             Baseline values (closest to index date within days_before/days_after window):
             - hemoglobin : float, g/dL
             - wbc : float, K/uL
+            - anc : float, 10^9/L
             - platelet : float, 10^9/L
             - creatinine : float, mg/dL
             - bun : float, mg/dL
@@ -1609,7 +1611,7 @@ class DataProcessorGeneral:
             - Values outside physiological ranges for each lab are filtered out
         -Unit conversion corrections:
             - Hemoglobin: Values in g/uL are divided by 100,000 to convert to g/dL
-            - WBC/Platelet: Values in 10*3/L are multiplied by 1,000,000; values in /mm3 or 10*3/mL are multiplied by 1,000
+            - WBC, ANC, and Platelet: Values in 10*3/L are multiplied by 1,000,000; values in /mm3 or 10*3/mL are multiplied by 1,000
             - Creatinine/BUN/Calcium: Values in mg/L are multiplied by 10 to convert to mg/dL
             - Albumin: Values in mg/dL are multiplied by 1,000 to convert to g/L; values 1-6 are assumed to be g/dL and multiplied by 10
         - Lab value selection:
@@ -1705,42 +1707,49 @@ class DataProcessorGeneral:
             )
             df.loc[mask, 'TestResultCleaned'] = df.loc[mask, 'TestResultCleaned'] / 100000 
 
-            # WBC and Platelet conversion correction
+            # WBC, ANC, and Platelet conversion correction
             # TestResultCleaned incorrectly stored 10*3/L values 
             # Example: 9 10*3/L was stored as 0.000009 10*9/L instead of 9 10*9/L
             # Need to multipley 1,000,000 to restore correct value
             mask = (
-                ((df['lab_name'] == 'wbc') | (df['lab_name'] == 'platelet')) & 
+                ((df['lab_name'] == 'wbc') | (df['lab_name'] == 'anc') | (df['lab_name'] == 'platelet')) & 
                 (df['TestUnits'] == '10*3/L')
             )
             df.loc[mask, 'TestResultCleaned'] = df.loc[mask, 'TestResultCleaned'] * 1000000
 
-            # WBC and Platelet conversion correction
+            # WBC, ANC, and Platelet conversion correction
             # TestResultCleaned incorrectly stored /mm3 and 10*3/mL values
             # Example: 9 /mm3 and 9 10*3/mL was stored as 0.009 10*9/L instead of 9 10*9/L
             # Need to multipley 1,000 to restore correct value
             mask = (
-                ((df['lab_name'] == 'wbc') | (df['lab_name'] == 'platelet')) & 
+                ((df['lab_name'] == 'wbc') | (df['lab_name'] == 'anc') | (df['lab_name'] == 'platelet')) & 
                 ((df['TestUnits'] == '/mm3') | (df['TestUnits'] == '10*3/mL'))
             )
             df.loc[mask, 'TestResultCleaned'] = df.loc[mask, 'TestResultCleaned'] * 1000
 
             # Hemoglobin: Convert to TestResult to numeric after removing L, H, <, and >; filter for ranges from 3-20; and impute to TestResultCleaned
-            mask = df.query('lab_name == "hemoglobin" and TestResultCleaned.isna() and TestResult.notna()').index
+            mask = df.query('lab_name == "hemoglobin" and TestUnits != "%" and TestResultCleaned.isna() and TestResult.notna()').index
             df.loc[mask, 'TestResultCleaned'] = (
                 pd.to_numeric(df.loc[mask, 'TestResult'].str.replace(r'[LH<>]', '', regex=True).str.strip(), errors='coerce')
                 .where(lambda x: (x >= 3) & (x <= 20))
             )
 
             # WBC: Convert to TestResult to numeric after removing L, H, <, and >; filter for ranges from 0-40; and impute to TestResultCleaned
-            mask = df.query('lab_name == "wbc" and TestResultCleaned.isna() and TestResult.notna()').index
+            mask = df.query('lab_name == "wbc" and TestUnits != "%" and TestResultCleaned.isna() and TestResult.notna()').index
             df.loc[mask, 'TestResultCleaned'] = (
                 pd.to_numeric(df.loc[mask, 'TestResult'].str.replace(r'[LH<>]', '', regex=True).str.strip(), errors='coerce')
                 .where(lambda x: (x >= 0) & (x <= 40))
             )
+
+            # ANC: Convert to TestResult to numeric after removing L, H, <, and >; filter for ranges from 0-10; and impute to TestResultCleaned
+            mask = df.query('lab_name == "anc" and TestUnits != "%" and TestResultCleaned.isna() and TestResult.notna()').index
+            df.loc[mask, 'TestResultCleaned'] = (
+                pd.to_numeric(df.loc[mask, 'TestResult'].str.replace(r'[LH<>]', '', regex=True).str.strip(), errors='coerce')
+                .where(lambda x: (x >= 0) & (x <= 10))
+            )
             
             # Platelet: Convert to TestResult to numeric after removing L, H, <, and >; filter for ranges from 0-1000; and impute to TestResultCleaned
-            mask = df.query('lab_name == "platelet" and TestResultCleaned.isna() and TestResult.notna()').index
+            mask = df.query('lab_name == "platelet" and TestUnits != "%" and TestResultCleaned.isna() and TestResult.notna()').index
             df.loc[mask, 'TestResultCleaned'] = (
                 pd.to_numeric(df.loc[mask, 'TestResult'].str.replace(r'[LH<>]', '', regex=True).str.strip(), errors='coerce')
                 .where(lambda x: (x >= 0) & (x <= 1000))
