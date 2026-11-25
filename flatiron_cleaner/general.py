@@ -1,13 +1,17 @@
 import pandas as pd
 import numpy as np
-import logging 
 import re 
-from typing import Optional
+from typing import Optional, Literal, Union
+from pathlib import Path
+
+import logging 
 
 logging.basicConfig(
     level = logging.INFO,                                 
     format = '%(asctime)s - %(levelname)s - %(message)s'  
 )
+
+logger = logging.getLogger(__name__)
 
 class DataProcessorGeneral:
 
@@ -381,6 +385,7 @@ class DataProcessorGeneral:
         self.medications_df = None 
         self.diagnosis_df = None 
         self.practice_df = None
+        self.progression_df = None
 
     def process_mortality(self, 
                           file_path: str,
@@ -1059,7 +1064,7 @@ class DataProcessorGeneral:
             imputed_weights = weight_df.loc[mask_needs_imputation, 'TestResult'].apply(
                 lambda x: x/2.2046 if x > 140  # Convert to kg since likely lbs 
                 else x if x < 70  # Keep as is if likely kg 
-                else None  # Leave as null if ambiguous
+                else np.nan  # Leave as null if ambiguous
             )
             
             weight_df.loc[mask_needs_imputation, 'TestResultCleaned'] = imputed_weights
@@ -1090,7 +1095,7 @@ class DataProcessorGeneral:
             imputed_heights = height_df.loc[mask_needs_imputation, 'TestResult'].apply(
                 lambda x: x * 2.54 if 55 <= x <= 80  # Convert to cm if likely inches (about 4'7" to 6'7")
                 else x if 140 <= x <= 220  # Keep as is if likely cm (about 4'7" to 7'2")
-                else None  # Leave as null if implausible or ambiguous
+                else np.nan  # Leave as null if implausible or ambiguous
             )
 
             height_df.loc[mask_needs_imputation, 'TestResultCleaned'] = imputed_heights
@@ -1135,7 +1140,7 @@ class DataProcessorGeneral:
                 .groupby('PatientID')
                 .agg({'TestResultCleaned': lambda x:
                     ((x.iloc[-1]-x.iloc[0])/x.iloc[0])*100 if x.iloc[0] != 0 and pd.notna(x.iloc[0]) and pd.notna(x.iloc[-1]) # (end-start)/start
-                    else None
+                    else np.nan
                     })
                 .reset_index()
                 .rename(columns = {'TestResultCleaned': 'percent_change_weight'})
@@ -2580,3 +2585,305 @@ class DataProcessorGeneral:
         except Exception as e:
             logging.error(f"Error processing Practice.csv file: {e}")
             return None
+
+    def process_progression(self, 
+                            file_path: Union[str, Path],
+                            index_date_df: pd.DataFrame,
+                            index_date_column: str,
+                            month_strategy: Literal["midpoint", "month_end"] = "midpoint",
+                            drop_dates: bool = True) -> pd.DataFrame:
+        """
+        Find the first recorded progression after each patient's index date.
+
+        Parameters
+        ----------
+        file_path : str or pathlib.Path
+            Path to the Flatiron progression CSV. Required columns are
+            PatientID, ProgressionDate, and ProgressionDateGranularity.
+
+        index_date_df : pandas.DataFrame
+            One row per patient containing PatientID and the index date.
+            PatientIDs must be unique and nonmissing. Index dates must be
+            nonmissing and parseable.
+
+        index_date_column : str
+            Name of the index date column in index_date_df.
+
+        month_strategy : {"midpoint", "month_end"}, default "midpoint"
+            How to assign a date to progression records with Month granularity.
+            The adjustment occurs before filtering and selecting events.
+
+            - "midpoint": use the middle calendar day, rounding toward the
+            earlier day when a month has two middle days.
+            - "month_end": use the last day of the month.
+
+            Day-granularity dates are unchanged. Nonblank dates with missing
+            or unsupported granularity raise an error.
+
+        drop_dates : bool, default True
+            If False, also return the index date and selected ProgressionDate.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per input patient, in input order, containing:
+
+            - PatientID
+            - progression_days: days from index to the first qualifying event
+            - ProgressionDateGranularity: precision of the selected event
+            - progression_overlaps_start: whether the selected event's possible
+            date interval includes the index date
+
+            Patients without a qualifying event have missing progression fields.
+            Date columns are included when drop_dates=False.
+
+        Notes
+        -----
+        Dates are interpreted as calendar dates. Same-day and pre-index
+        progression are excluded. All evidence types are eligible.
+
+        The earliest adjusted date is selected. If dates are tied,
+        Day-granularity records are preferred, followed by the original CSV
+        row order.
+
+        A month-level event may qualify after imputation even if its possible
+        date interval includes the index date. The progression_overlaps_start
+        column identifies these uncertain selected events.
+
+        A missing progression duration means no qualifying progression was
+        documented; it does not confirm absence of progression. This function
+        does not assign censoring, handle death, restrict events to a treatment
+        line, or impose a follow-up cutoff.
+        """
+
+        # Validate the function arguments and patient-level data.
+        if month_strategy not in ("midpoint", "month_end"):
+            raise ValueError(
+                "month_strategy must be 'midpoint' or 'month_end'"
+            )
+
+        if not isinstance(index_date_df, pd.DataFrame):
+            raise TypeError("index_date_df must be a pandas DataFrame")
+
+        if index_date_column == "PatientID":
+            raise ValueError(
+                "index_date_column must differ from 'PatientID'"
+            )
+
+        required_index_columns = {"PatientID", index_date_column}
+
+        if not required_index_columns.issubset(index_date_df.columns):
+            raise ValueError(
+                "index_date_df must contain PatientID and index_date_column"
+            )
+
+        if index_date_df["PatientID"].isna().any():
+            raise ValueError("index_date_df contains missing PatientID values")
+
+        if index_date_df["PatientID"].duplicated().any():
+            raise ValueError("index_date_df contains duplicate PatientID values")
+
+        output_columns = {
+            "ProgressionDate",
+            "ProgressionDateGranularity",
+            "progression_days",
+            "progression_overlaps_start",
+        }
+
+        if index_date_column in output_columns:
+            raise ValueError(
+                "index_date_column conflicts with a progression output column"
+            )
+
+        # Prepare one index date per patient.
+        patient_dates = index_date_df[
+            ["PatientID", index_date_column]
+        ].copy()
+
+        patient_dates = patient_dates.rename(
+            columns={index_date_column: "_index_date"}
+        )
+
+        patient_dates["_index_date"] = pd.to_datetime(
+            patient_dates["_index_date"],
+            format="mixed",
+            errors="raise",
+        ).dt.normalize()
+
+        if patient_dates["_index_date"].isna().any():
+            raise ValueError("index_date_df contains missing index dates")
+
+        # Read progression records for the patients of interest.
+        progression = pd.read_csv(file_path)
+
+        required_progression_columns = [
+            "PatientID",
+            "ProgressionDate",
+            "ProgressionDateGranularity",
+        ]
+
+        if not set(required_progression_columns).issubset(progression.columns):
+            raise ValueError(
+                "Progression CSV must contain "
+                f"{required_progression_columns}"
+            )
+
+        progression = progression.loc[
+            progression["PatientID"].isin(patient_dates["PatientID"]),
+            required_progression_columns,
+        ].copy()
+
+        # Remove blank dates, then convert the remaining dates to calendar dates.
+        raw_dates = (
+            progression["ProgressionDate"]
+            .astype("string")
+            .str.strip()
+        )
+
+        progression = progression.loc[
+            raw_dates.notna() & raw_dates.ne("")
+        ].copy()
+
+        progression["ProgressionDate"] = pd.to_datetime(
+            raw_dates.loc[progression.index],
+            format="mixed",
+            errors="raise",
+        ).dt.normalize()
+
+        if progression["ProgressionDate"].isna().any():
+            raise ValueError(
+                "Nonblank progression dates must be parseable dates"
+            )
+
+        # Standardize and validate date granularity.
+        granularity = (
+            progression["ProgressionDateGranularity"]
+            .astype("string")
+            .str.strip()
+            .str.lower()
+        )
+
+        if (~granularity.isin(["day", "month"])).any():
+            raise ValueError(
+                "Nonblank progression dates require Day or Month granularity"
+            )
+
+        progression["ProgressionDateGranularity"] = granularity.map(
+            {"day": "Day", "month": "Month"}
+        )
+
+        # Record the possible date interval for each progression event.
+        # For Day granularity, the start and end are the same date.
+        progression["_progression_date_start"] = progression["ProgressionDate"]
+        progression["_progression_date_end"] = progression["ProgressionDate"]
+
+        month_mask = granularity.eq("month")
+
+        month_start = (
+            progression.loc[month_mask, "ProgressionDate"]
+            .dt.to_period("M")
+            .dt.to_timestamp()
+        )
+        month_end = month_start + pd.offsets.MonthEnd(0)
+
+        progression.loc[
+            month_mask, "_progression_date_start"
+        ] = month_start
+
+        progression.loc[
+            month_mask, "_progression_date_end"
+        ] = month_end
+
+        # Assign an estimated date to month-level records.
+        if month_strategy == "midpoint":
+            days_to_midpoint = (month_end - month_start).dt.days // 2
+
+            progression.loc[month_mask, "ProgressionDate"] = (
+                month_start
+                + pd.to_timedelta(days_to_midpoint, unit="D")
+            )
+        else:
+            progression.loc[month_mask, "ProgressionDate"] = month_end
+
+        # Attach the index date and flag events that could overlap treatment start.
+        progression = progression.merge(
+            patient_dates,
+            on="PatientID",
+            how="inner",
+            validate="many_to_one",
+        )
+
+        progression["progression_overlaps_start"] = (
+            (
+                progression["_progression_date_start"]
+                <= progression["_index_date"]
+            )
+            & (
+                progression["_progression_date_end"]
+                >= progression["_index_date"]
+            )
+        )
+
+        # Keep only events with an adjusted date after the index date.
+        progression = progression.loc[
+            progression["ProgressionDate"] > progression["_index_date"]
+        ].copy()
+
+        # Select the earliest event. For tied dates, prefer Day granularity.
+        progression["_is_month_granularity"] = (
+            progression["ProgressionDateGranularity"] == "Month"
+        )
+
+        first_progression = (
+            progression.sort_values(
+                ["ProgressionDate", "_is_month_granularity"],
+                kind="stable",
+            )
+            .drop_duplicates("PatientID", keep="first")
+        )
+
+        # Merge the selected event back to all input patients.
+        selected_columns = [
+            "PatientID",
+            "ProgressionDate",
+            "ProgressionDateGranularity",
+            "progression_overlaps_start",
+        ]
+
+        result = patient_dates.merge(
+            first_progression[selected_columns],
+            on="PatientID",
+            how="left",
+            sort=False,
+            validate="one_to_one",
+        )
+
+        result["progression_days"] = (
+            result["ProgressionDate"] - result["_index_date"]
+        ).dt.days.astype("Int64")
+
+        result["progression_overlaps_start"] = (
+            result["progression_overlaps_start"].astype("boolean")
+        )
+
+        result_columns = [
+            "PatientID",
+            "progression_days",
+            "ProgressionDateGranularity",
+            "progression_overlaps_start",
+        ]
+
+        if not drop_dates:
+            result = result.rename(
+                columns={"_index_date": index_date_column}
+            )
+            result_columns += [index_date_column, "ProgressionDate"]
+
+        logger.info(
+            "Processed progression for %s patients; %s have qualifying events",
+            len(result),
+            result["progression_days"].notna().sum(),
+        )
+
+        self.progression_df = result[result_columns]
+        return result[result_columns]
