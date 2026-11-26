@@ -795,11 +795,12 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             return None
         
     def process_biomarkers(self,
-                           file_path: str,
-                           index_date_df: pd.DataFrame,
-                           index_date_column: str, 
-                           days_before: Optional[int] = None,
-                           days_after: int = 0) -> Optional[pd.DataFrame]:
+                          file_path: str,
+                          index_date_df: pd.DataFrame,
+                          index_date_column: str, 
+                          days_before: Optional[int] = None,
+                          days_after: int = 0,
+                          pdl1_positive_cutoff: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
         Processes Enhanced_AdvUrothelialBiomarkers.csv by determining FGFR and PDL1 status for each patient within a specified time window relative to an index date
 
@@ -815,6 +816,12 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             Number of days before the index date to include. Must be >= 0 or None. If None, includes all prior results. Default: None
         days_after : int, optional
             Number of days after the index date to include. Must be >= 0. Default: 0
+        pdl1_positive_cutoff : str | None, optional
+            PercentStaining category at or above which a PD-L1 result counts as positive for PDL1_status,
+            regardless of BiomarkerStatus. Must be a key of PDL1_PERCENT_STAINING_MAPPING (e.g., '1%', '5% - 9%').
+            Default None classifies status from BiomarkerStatus alone, because urothelial PD-L1 positivity is
+            assay-specific (e.g., 22C3 CPS >= 10, SP142 immune cells >= 5%, SP263 tumor or immune cells >= 25%)
+            and no single percent-staining cutoff applies across assays
         
         Returns
         -------
@@ -824,9 +831,12 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             - FGFR_status : category
                 positive if ever-positive, negative if only-negative, otherwise unknown
             - PDL1_status : category
-                positive if ever-positive, negative if only-negative, otherwise unknown
+                positive if any test has BiomarkerStatus 'PD-L1 positive' (or percent staining >= pdl1_positive_cutoff,
+                if set); negative if no positive tests and any test is 'PD-L1 negative/not detected' (or below the
+                cutoff, if set); otherwise unknown
             - PDL1_percent_staining : category, ordered 
-                returns a patient's maximum percent staining for PDL1 (NaN if no positive PDL1 results)
+                patient's maximum PD-L1 percent staining across all tests in the window, including negative results
+                (NaN if no PD-L1 test with a recorded percentage)
 
         Notes
         ------
@@ -860,6 +870,8 @@ class DataProcessorUrothelial(DataProcessorGeneral):
                 raise ValueError("days_before must be a non-negative integer or None")
         if not isinstance(days_after, int) or days_after < 0:
             raise ValueError("days_after must be a non-negative integer")
+        if pdl1_positive_cutoff is not None and pdl1_positive_cutoff not in self.PDL1_PERCENT_STAINING_MAPPING:
+            raise ValueError(f"pdl1_positive_cutoff must be None or one of {list(self.PDL1_PERCENT_STAINING_MAPPING)}")
         
         index_date_df = index_date_df.copy()
         # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
@@ -885,10 +897,10 @@ class DataProcessorUrothelial(DataProcessorGeneral):
             # Select PatientIDs that are included in the index_date_df the merge on 'left'
             df = df[df.PatientID.isin(index_date_df.PatientID)]
             df = pd.merge(
-                 df,
-                 index_date_df[['PatientID', index_date_column]],
-                 on = 'PatientID',
-                 how = 'left'
+                    df,
+                    index_date_df[['PatientID', index_date_column]],
+                    on = 'PatientID',
+                    how = 'left'
             )
             logging.info(f"Successfully merged Enhanced_AdvUrothelialBiomarkers.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
             
@@ -918,28 +930,48 @@ class DataProcessorUrothelial(DataProcessorGeneral):
                 .rename(columns={'BiomarkerStatus': 'FGFR_status'})
             )
             
-            # Process PDL1 status
+            # Process PDL1 status: classify each test, then each patient
+            pdl1_tests = df_filtered.query('BiomarkerName == "PDL1"').copy()
+            pdl1_tests['PDL1_ordinal_value'] = pdl1_tests['PercentStaining'].map(self.PDL1_PERCENT_STAINING_MAPPING)
+
+            status_positive = pdl1_tests['BiomarkerStatus'].eq('PD-L1 positive')
+            status_negative = pdl1_tests['BiomarkerStatus'].eq('PD-L1 negative/not detected')
+
+            if pdl1_positive_cutoff is not None:
+                cutoff = self.PDL1_PERCENT_STAINING_MAPPING[pdl1_positive_cutoff]
+                pct_positive = pdl1_tests['PDL1_ordinal_value'].ge(cutoff)   # NaN -> False
+                pct_negative = pdl1_tests['PDL1_ordinal_value'].lt(cutoff)   # NaN -> False
+            else:
+                pct_positive = pd.Series(False, index = pdl1_tests.index)
+                pct_negative = pd.Series(False, index = pdl1_tests.index)
+
+            pdl1_tests['test_positive'] = status_positive | pct_positive
+            pdl1_tests['test_negative'] = (status_negative | pct_negative) & ~pdl1_tests['test_positive']
+
             PDL1_df = (
-                df_filtered
-                .query('BiomarkerName == "PDL1"')
-                .groupby('PatientID')['BiomarkerStatus']
-                .agg(lambda x: 'positive' if any ('PD-L1 positive' in val for val in x)
-                    else ('negative' if any('PD-L1 negative/not detected' in val for val in x)
-                        else 'unknown'))
+                pdl1_tests
+                .groupby('PatientID')[['test_positive', 'test_negative']]
+                .any()
+                .assign(PDL1_status = lambda x: np.select(
+                    [x['test_positive'], x['test_negative']],
+                    ['positive', 'negative'],
+                    default = 'unknown'))
                 .reset_index()
-                .rename(columns={'BiomarkerStatus': 'PDL1_status'})
+                [['PatientID', 'PDL1_status']]
             )
 
-            # Process PDL1 staining 
+            n_pct_override = int((status_negative & pct_positive).sum())
+            if n_pct_override > 0:
+                logging.info(f"{n_pct_override} PD-L1 records with BiomarkerStatus 'PD-L1 negative/not detected' were classified positive based on percent staining >= {pdl1_positive_cutoff}")
+
+            # Process PDL1 staining
+            # Maximum percent staining across all PD-L1 tests with a recorded percentage,
+            # regardless of BiomarkerStatus, so negative results are retained
             PDL1_staining_df = (
-                df_filtered
-                .query('BiomarkerName == "PDL1"')
-                .query('BiomarkerStatus == "PD-L1 positive"')
-                .groupby('PatientID')['PercentStaining']
-                .apply(lambda x: x.map(self.PDL1_PERCENT_STAINING_MAPPING))
-                .groupby('PatientID')
-                .agg('max')
-                .to_frame(name = 'PDL1_ordinal_value')
+                pdl1_tests
+                .dropna(subset = ['PDL1_ordinal_value'])
+                .groupby('PatientID')['PDL1_ordinal_value']
+                .max()
                 .reset_index()
             )
             
@@ -959,9 +991,9 @@ class DataProcessorUrothelial(DataProcessorGeneral):
 
             staining_dtype = pd.CategoricalDtype(
                 categories = ['0%', '< 1%', '1%', '2% - 4%', '5% - 9%', '10% - 19%',
-                              '20% - 29%', '30% - 39%', '40% - 49%', '50% - 59%',
-                              '60% - 69%', '70% - 79%', '80% - 89%', '90% - 99%', '100%'],
-                              ordered = True
+                                '20% - 29%', '30% - 39%', '40% - 49%', '50% - 59%',
+                                '60% - 69%', '70% - 79%', '80% - 89%', '90% - 99%', '100%'],
+                                ordered = True
             )
             
             final_df['PDL1_percent_staining'] = final_df['PDL1_percent_staining'].astype(staining_dtype)
