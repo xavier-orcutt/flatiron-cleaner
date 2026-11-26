@@ -436,7 +436,9 @@ class DataProcessorNSCLC(DataProcessorGeneral):
                            index_date_df: pd.DataFrame,
                            index_date_column: str, 
                            days_before: Optional[int] = None,
-                           days_after: int = 0) -> Optional[pd.DataFrame]:
+                           days_after: int = 0,
+                           impute_negative_staining: bool = True,
+                           tps_positive_cutoff: Optional[str] = '1%') -> Optional[pd.DataFrame]:
         """
         Processes Enhanced_AdvNSCLCBiomarkers.csv by determining biomarker status for each patient within a specified time window relative to an index date. 
 
@@ -452,6 +454,14 @@ class DataProcessorNSCLC(DataProcessorGeneral):
             Number of days before the index date to include. Must be >= 0 or None. If None, includes all prior results. Default: None
         days_after : int, optional
             Number of days after the index date to include. Must be >= 0. Default: 0
+        impute_negative_staining : bool, optional
+            If True, PD-L1 results with BiomarkerStatus 'PD-L1 negative/not detected' and no
+            recorded PercentStaining are assigned '< 1%'. Default: True
+        tps_positive_cutoff : str | None, optional
+            PercentStaining category at or above which a PD-L1 result counts as positive for PDL1_status,
+            regardless of BiomarkerStatus. Must be a key of PDL1_PERCENT_STAINING_MAPPING (e.g., '1%' for
+            TPS >= 1%, '50% - 59%' for TPS >= 50%). Set to None to classify status from BiomarkerStatus alone.
+            Default: '1%'
         
         Returns
         -------
@@ -475,9 +485,12 @@ class DataProcessorNSCLC(DataProcessorGeneral):
             - NTRK_status : category
                 positive if ever-positive, negative if only-negative, otherwise unknown
             - PDL1_status : category 
-                positive if ever-positive, negative if only-negative, otherwise unknown
+                positive if any test has BiomarkerStatus 'PD-L1 positive' or TPS >= tps_positive_cutoff;
+                negative if no positive tests and any test is 'PD-L1 negative/not detected' or has TPS below
+                the cutoff; otherwise unknown
             - PDL1_percent_staining : category, ordered 
-                returns a patient's maximum percent staining for PDL1 (NaN if no positive PDL1 results)
+                patient's maximum PD-L1 percent staining across all tests in the window, including
+                negative results (NaN if no PD-L1 test with a recorded or imputable percentage)
 
         Notes
         ------
@@ -487,6 +500,11 @@ class DataProcessorNSCLC(DataProcessorGeneral):
             - 'positive' if any test result is positive (ever-positive)
             - 'negative' if any test is negative without positives (only-negative) 
             - 'unknown' if all results are indeterminate
+        - For PD-L1, each test is classified first:
+            - positive if BiomarkerStatus is 'PD-L1 positive' OR TPS >= tps_positive_cutoff
+            - negative if BiomarkerStatus is 'PD-L1 negative/not detected' OR TPS < tps_positive_cutoff
+            - TPS takes precedence over a negative BiomarkerStatus (e.g., status negative with TPS 5% - 9% is positive)
+            - imputed '< 1%' values (impute_negative_staining) affect PDL1_percent_staining only, not PDL1_status
 
         - Missing biomarker data handling:
             - All PatientIDs from index_date_df are included in the output
@@ -512,6 +530,8 @@ class DataProcessorNSCLC(DataProcessorGeneral):
                 raise ValueError("days_before must be a non-negative integer or None")
         if not isinstance(days_after, int) or days_after < 0:
             raise ValueError("days_after must be a non-negative integer")
+        if tps_positive_cutoff is not None and tps_positive_cutoff not in self.PDL1_PERCENT_STAINING_MAPPING:
+            raise ValueError(f"tps_positive_cutoff must be None or one of {list(self.PDL1_PERCENT_STAINING_MAPPING)}")
         
         index_date_df = index_date_df.copy()
         # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
@@ -616,31 +636,64 @@ class DataProcessorNSCLC(DataProcessorGeneral):
                     .rename(columns={'BiomarkerStatus': f'{biomarker}_status'})  # Rename for clarity
             )
             
-            # Process PDL1 and add to biomarker_dfs
+            # Process PDL1 status: classify each test, then each patient
+            pdl1_tests = df_filtered.query('BiomarkerName == "PDL1"').copy()
+            tps_ordinal = pdl1_tests['PercentStaining'].map(self.PDL1_PERCENT_STAINING_MAPPING)
+
+            status_positive = pdl1_tests['BiomarkerStatus'].eq('PD-L1 positive')
+            status_negative = pdl1_tests['BiomarkerStatus'].eq('PD-L1 negative/not detected')
+
+            if tps_positive_cutoff is not None:
+                cutoff = self.PDL1_PERCENT_STAINING_MAPPING[tps_positive_cutoff]
+                tps_positive = tps_ordinal.ge(cutoff)   # NaN TPS -> False
+                tps_negative = tps_ordinal.lt(cutoff)   # NaN TPS -> False
+            else:
+                tps_positive = pd.Series(False, index = pdl1_tests.index)
+                tps_negative = pd.Series(False, index = pdl1_tests.index)
+
+            pdl1_tests['test_positive'] = status_positive | tps_positive
+            pdl1_tests['test_negative'] = (status_negative | tps_negative) & ~pdl1_tests['test_positive']
+
             biomarker_dfs['PDL1'] = (
-                df_filtered
-                .query('BiomarkerName == "PDL1"')
-                .groupby('PatientID')['BiomarkerStatus']
-                .agg(lambda x: 'positive' if any ('PD-L1 positive' in val for val in x)
-                    else ('negative' if any('PD-L1 negative/not detected' in val for val in x)
-                        else 'unknown'))
+                pdl1_tests
+                .groupby('PatientID')[['test_positive', 'test_negative']]
+                .any()
+                .assign(PDL1_status = lambda x: np.select(
+                    [x['test_positive'], x['test_negative']],
+                    ['positive', 'negative'],
+                    default = 'unknown'))
                 .reset_index()
-                .rename(columns={'BiomarkerStatus': 'PDL1_status'})
+                [['PatientID', 'PDL1_status']]
             )
 
-            # Process PDL1 percent staining 
+            n_tps_override = int((status_negative & tps_positive).sum())
+            if n_tps_override > 0:
+                logging.info(f"{n_tps_override} PD-L1 records with BiomarkerStatus 'PD-L1 negative/not detected' were classified positive based on TPS >= {tps_positive_cutoff}")
+
+            # Process PDL1 percent staining
+            # Use every PD-L1 row with a recorded PercentStaining, regardless of
+            # BiomarkerStatus, so negative tests ('0%', '< 1%') are retained.
+            pdl1_df = df_filtered.query('BiomarkerName == "PDL1"').copy()
+            pdl1_df['PDL1_ordinal_value'] = pdl1_df['PercentStaining'].map(self.PDL1_PERCENT_STAINING_MAPPING)
+
+            # Negative/not detected results without a recorded percentage are
+            # assigned '< 1%' (TPS below the positivity threshold).
+            if impute_negative_staining:
+                negative_no_percent = (
+                    (pdl1_df['BiomarkerStatus'] == 'PD-L1 negative/not detected') &
+                    (pdl1_df['PDL1_ordinal_value'].isna())
+                )
+                pdl1_df.loc[negative_no_percent, 'PDL1_ordinal_value'] = self.PDL1_PERCENT_STAINING_MAPPING['< 1%']
+
+            # Maximum staining across all qualifying tests in the window
             PDL1_staining_df = (
-                df_filtered
-                .query('BiomarkerName == "PDL1"')
-                .query('BiomarkerStatus == "PD-L1 positive"')
-                .groupby('PatientID')['PercentStaining']
-                .apply(lambda x: x.map(self.PDL1_PERCENT_STAINING_MAPPING))
-                .groupby('PatientID')
-                .agg('max')
-                .to_frame(name = 'PDL1_ordinal_value')
+                pdl1_df
+                .dropna(subset = ['PDL1_ordinal_value'])
+                .groupby('PatientID')['PDL1_ordinal_value']
+                .max()
                 .reset_index()
             )
-            
+
             # Create reverse mapping to convert back to percentage strings
             reverse_pdl1_dict = {v: k for k, v in self.PDL1_PERCENT_STAINING_MAPPING.items()}
             PDL1_staining_df['PDL1_percent_staining'] = PDL1_staining_df['PDL1_ordinal_value'].map(reverse_pdl1_dict)
@@ -667,7 +720,7 @@ class DataProcessorNSCLC(DataProcessorGeneral):
             
             final_df['PDL1_percent_staining'] = final_df['PDL1_percent_staining'].astype(staining_dtype)
 
-           # Check for duplicate PatientIDs
+            # Check for duplicate PatientIDs
             if len(final_df) > final_df['PatientID'].nunique():
                 duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
                 logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")

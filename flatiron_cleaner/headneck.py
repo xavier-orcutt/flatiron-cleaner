@@ -263,227 +263,264 @@ class DataProcessorHeadNeck(DataProcessorGeneral):
             return None
         
     def process_biomarkers(self,
-                           file_path: str,
-                           index_date_df: pd.DataFrame,
-                           index_date_column: str, 
-                           days_before: Optional[int] = None,
-                           days_after: int = 0,
-                           pdl1_result_type: str = 'cps') -> Optional[pd.DataFrame]:
-        """
-        Processes Enhanced_AdvHeadNeckBiomarkers.csv by determining FGFR and PDL1 status for each patient within a specified time window relative to an index date
-
-        Parameters
-        ----------
-        file_path : str
-            Path to Enhanced_AdvHeadNeckBiomarkers.csv file
-        index_date_df : pd.DataFrame
-            DataFrame containing unique PatientIDs and their corresponding index dates. Only biomarker data for PatientIDs present in this DataFrame will be processed
-        index_date_column : str
-            Column name in index_date_df containing the index date
-        days_before : int | None, optional
-            Number of days before the index date to include. Must be >= 0 or None. If None, includes all prior results. Default: None
-        days_after : int, optional
-            Number of days after the index date to include. Must be >= 0. Default: 0
-        pdl1_result_type: str, default = 'cps'
-            Type of PD-L1 quantification to return: 
-                - 'cps': Combined Positive Score
-                - 'percent_staining': Tumor Proportion Score (TPS). Less commonly used in head and neck cancers
-        
-        Returns
-        -------
-        pd.DataFrame or None
-            - PatientID : object
-                unique patient identifier
-            - PDL1_status : category
-                positive if ever-positive, negative if only-negative, otherwise unknown
-            - PDL1_cps : category, ordered 
-                if pdl1_result_type = 'cps', returns a patient's maximum CPS for PDL1 (NaN if no positive PDL1 results or CPS results are 'Unknown/not documented')
-            - PDL1_percent_staining : category, ordered 
-                if pdl1_result_type = 'percent_staining', returns a patient's maximum percent staining for PDL1 (NaN if no positive PDL1 results)
-
-        Notes
-        ------
-        Biomarker cleaning and processing: 
-        - PDL1 status is classified as:
-            - 'positive' if any test result is positive (ever-positive)
-            - 'negative' if any test is negative without positives (only-negative) 
-            - 'unknown' if all results are indeterminate
-
-        - Missing biomarker data handling:
-            - All PatientIDs from index_date_df are included in the output
-            - Patients without any biomarker tests will have NaN values for all biomarker columns
-            - Missing ResultDate is imputed with SpecimenReceivedDate
-
-        Output handling: 
-        - Duplicate PatientIDs are logged as warnings if found but retained in output
-        - Processed DataFrame is stored in self.biomarkers_df
-        """
-        # Input validation
-        if not isinstance(index_date_df, pd.DataFrame):
-            raise ValueError("index_date_df must be a pandas DataFrame")
-        if 'PatientID' not in index_date_df.columns:
-            raise ValueError("index_date_df must contain a 'PatientID' column")
-        if not index_date_column or index_date_column not in index_date_df.columns:
-            raise ValueError('index_date_column not found in index_date_df')
-        if index_date_df['PatientID'].duplicated().any():
-            raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
-        
-        if days_before is not None:
-            if not isinstance(days_before, int) or days_before < 0:
-                raise ValueError("days_before must be a non-negative integer or None")
-        if not isinstance(days_after, int) or days_after < 0:
-            raise ValueError("days_after must be a non-negative integer")
-        
-        index_date_df = index_date_df.copy()
-        # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
-        for col in index_date_df.columns:
-            if col != 'PatientID':  # Keep PatientID unchanged for merging
-                index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
-
-        # Update index_date_column name
-        index_date_column = f'imported_{index_date_column}'
-
-        try:
-            df = pd.read_csv(file_path)
-            logging.info(f"Successfully read Enhanced_AdvHeadNeckBiomarkers.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
-
-            df['ResultDate'] = pd.to_datetime(df['ResultDate'])
-            df['SpecimenReceivedDate'] = pd.to_datetime(df['SpecimenReceivedDate'])
-
-            # Impute missing ResultDate with SpecimenReceivedDate
-            df['ResultDate'] = np.where(df['ResultDate'].isna(), df['SpecimenReceivedDate'], df['ResultDate'])
-
-            index_date_df[index_date_column] = pd.to_datetime(index_date_df[index_date_column])
-
-            # Select PatientIDs that are included in the index_date_df the merge on 'left'
-            df = df[df.PatientID.isin(index_date_df.PatientID)]
-            df = pd.merge(
-                 df,
-                 index_date_df[['PatientID', index_date_column]],
-                 on = 'PatientID',
-                 how = 'left'
-            )
-            logging.info(f"Successfully merged Enhanced_AdvHeadNeckBiomarkers.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
-            
-            # Create new variable 'index_to_result' that notes difference in days between resulted specimen and index date
-            df['index_to_result'] = (df['ResultDate'] - df[index_date_column]).dt.days
-            
-            # Select biomarkers that fall within desired before and after index date
-            if days_before is None:
-                # Only filter for days after
-                df_filtered = df[df['index_to_result'] <= days_after].copy()
-            else:
-                # Filter for both before and after
-                df_filtered = df[
-                    (df['index_to_result'] <= days_after) & 
-                    (df['index_to_result'] >= -days_before)
-                ].copy()
-
-            inconsistent = df_filtered[
-                (df_filtered['BiomarkerStatus'] == 'PD-L1 positive') & 
-                (df_filtered['CombinedPositiveScore'].isin(['0', '<1']))
-            ]
-
-            if len(inconsistent) > 0:
-                inconsistent_ids = inconsistent.PatientID.unique().tolist()
-                logging.warning(f"Found {len(inconsistent)} records (PatientIDs: {inconsistent_ids}) with PD-L1 positive but CPS 0 or <1 - possible data quality issue")
-            
-            # Process PDL1 status
-            PDL1_df = (
-                df_filtered
-                .query('BiomarkerName == "PDL1"')
-                .groupby('PatientID')['BiomarkerStatus']
-                .agg(lambda x: 'positive' if any ('PD-L1 positive' in val for val in x)
-                    else ('negative' if any('PD-L1 negative/not detected' in val for val in x)
-                        else 'unknown'))
-                .reset_index()
-                .rename(columns={'BiomarkerStatus': 'PDL1_status'})
-            )
-
-            # Process PDL1 staining 
-            if pdl1_result_type == 'cps': 
-                # Replace unknown with empty
-                df_filtered.loc[df_filtered['CombinedPositiveScore'] == "Unknown/not documented", 'CombinedPositiveScore'] = np.nan
-                
-                PDL1_cps_df = (
-                    df_filtered
-                    .query('BiomarkerName == "PDL1"')
-                    .query('BiomarkerStatus == "PD-L1 positive"')
-                    .groupby('PatientID')['CombinedPositiveScore']
-                    .apply(lambda x: x.map(self.PDL1_CPS_MAPPING))
-                    .groupby('PatientID')
-                    .agg('max')
-                    .to_frame(name = 'PDL1_cps_ordinal_value')
-                    .reset_index()
-                )
-                reverse_pdl1_cps_dict = {v: k for k, v in self.PDL1_CPS_MAPPING.items()}
-                PDL1_cps_df['PDL1_cps'] = PDL1_cps_df['PDL1_cps_ordinal_value'].map(reverse_pdl1_cps_dict)
-                PDL1_cps_df = PDL1_cps_df.drop(columns = ['PDL1_cps_ordinal_value'])
-
-                # Merge dataframes -- start with index_date_df to ensure all PatientIDs are included
-                final_df = index_date_df[['PatientID']].copy()
-                final_df = pd.merge(final_df, PDL1_df, on = 'PatientID', how = 'left')
-                final_df = pd.merge(final_df, PDL1_cps_df, on = 'PatientID', how = 'left')
-
-                final_df['PDL1_status'] = final_df['PDL1_status'].astype('category')
-
-                cps_dtype = pd.CategoricalDtype(
-                    categories = ['0', '<1', '1', '2-4', '5-9', '10-19',
-                                '20-29', '30-39', '40-49', '50-59',
-                                '60-69', '70-79', '80-89', '90-99', '100'],
-                                ordered = True
-                )
-                
-                final_df['PDL1_cps'] = final_df['PDL1_cps'].astype(cps_dtype)
-                
-            elif pdl1_result_type == 'percent_staining': 
-                PDL1_percent_staining_df = (
-                    df_filtered
-                    .query('BiomarkerName == "PDL1"')
-                    .query('BiomarkerStatus == "PD-L1 positive"')
-                    .groupby('PatientID')['PercentStaining']
-                    .apply(lambda x: x.map(self.PDL1_PERCENT_STAINING_MAPPING))
-                    .groupby('PatientID')
-                    .agg('max')
-                    .to_frame(name = 'PDL1_percent_staining_ordinal_value')
-                    .reset_index()
-                )
-                reverse_pdl1_percent_staining_dict = {v: k for k, v in self.PDL1_PERCENT_STAINING_MAPPING.items()}
-                PDL1_percent_staining_df['PDL1_percent_staining'] = PDL1_percent_staining_df['PDL1_percent_staining_ordinal_value'].map(reverse_pdl1_percent_staining_dict)
-                PDL1_percent_staining_df = PDL1_percent_staining_df.drop(columns = ['PDL1_percent_staining_ordinal_value'])
-
-                # Merge dataframes -- start with index_date_df to ensure all PatientIDs are included
-                final_df = index_date_df[['PatientID']].copy()
-                final_df = pd.merge(final_df, PDL1_df, on = 'PatientID', how = 'left')
-                final_df = pd.merge(final_df, PDL1_percent_staining_df, on = 'PatientID', how = 'left')
-
-                final_df['PDL1_status'] = final_df['PDL1_status'].astype('category')
-
-                percent_staining_dtype = pd.CategoricalDtype(
-                    categories = ['0%', '< 1%', '1%', '2% - 4%', '5% - 9%', '10% - 19%',
-                                '20% - 29%', '30% - 39%', '40% - 49%', '50% - 59%',
-                                '60% - 69%', '70% - 79%', '80% - 89%', '90% - 99%', '100%'],
-                                ordered = True
-                )
-                
-                final_df['PDL1_percent_staining'] = final_df['PDL1_percent_staining'].astype(percent_staining_dtype)
-
-            else: 
-                raise ValueError("pdl1_result_type must be 'cps' or 'percent_staining'")
-
-            # Check for duplicate PatientIDs
-            if len(final_df) > final_df['PatientID'].nunique():
-                duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
-                logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
-
-            logging.info(f"Successfully processed Enhanced_AdvHeadNeckBiomarkers.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
-            self.biomarkers_df = final_df
-            return final_df
-
-        except Exception as e:
-            logging.error(f"Error processing Enhanced_AdvHeadNeckBiomarkers.csv file: {e}")
-            return None
+                               file_path: str,
+                               index_date_df: pd.DataFrame,
+                               index_date_column: str, 
+                               days_before: Optional[int] = None,
+                               days_after: int = 0,
+                               pdl1_result_type: str = 'cps',
+                               cps_positive_cutoff: str = '1') -> Optional[pd.DataFrame]:
+            """
+            Processes Enhanced_AdvHeadNeckBiomarkers.csv by determining FGFR and PDL1 status for each patient within a specified time window relative to an index date
     
+            Parameters
+            ----------
+            file_path : str
+                Path to Enhanced_AdvHeadNeckBiomarkers.csv file
+            index_date_df : pd.DataFrame
+                DataFrame containing unique PatientIDs and their corresponding index dates. Only biomarker data for PatientIDs present in this DataFrame will be processed
+            index_date_column : str
+                Column name in index_date_df containing the index date
+            days_before : int | None, optional
+                Number of days before the index date to include. Must be >= 0 or None. If None, includes all prior results. Default: None
+            days_after : int, optional
+                Number of days after the index date to include. Must be >= 0. Default: 0
+            pdl1_result_type: str, default = 'cps'
+                Type of PD-L1 quantification to return: 
+                    - 'cps': Combined Positive Score
+                    - 'percent_staining': Tumor Proportion Score (TPS). Less commonly used in head and neck cancers
+            cps_positive_cutoff : str, default = '1'
+                CPS category at or above which a result counts as PD-L1 positive for PDL1_status, regardless
+                of BiomarkerStatus. Must be a key of PDL1_CPS_MAPPING (e.g., '1' for CPS >= 1, '20-29' for CPS >= 20).
+                Set to None to classify status from BiomarkerStatus alone
+            
+            Returns
+            -------
+            pd.DataFrame or None
+                - PatientID : object
+                    unique patient identifier
+                - PDL1_status : category
+                    positive if any test has BiomarkerStatus 'PD-L1 positive' or CPS >= cps_positive_cutoff;
+                    negative if no positive tests and any test is 'PD-L1 negative/not detected' or has CPS below the cutoff;
+                    otherwise unknown
+                - PDL1_cps : category, ordered 
+                    if pdl1_result_type = 'cps', returns a patient's maximum CPS across all PD-L1 tests in the window, including negative results (NaN if no recorded CPS or CPS is 'Unknown/not documented')
+                - PDL1_percent_staining : category, ordered 
+                    if pdl1_result_type = 'percent_staining', returns a patient's maximum percent staining across all PD-L1 tests in the window, including negative results (NaN if no recorded percent staining)
+    
+            Notes
+            ------
+            Biomarker cleaning and processing: 
+            - PDL1 status is classified per test, then per patient:
+                - a test is positive if BiomarkerStatus is 'PD-L1 positive' OR CPS >= cps_positive_cutoff
+                - a test is negative if BiomarkerStatus is 'PD-L1 negative/not detected' OR CPS < cps_positive_cutoff
+                - patient is 'positive' if any test is positive (ever-positive), 'negative' if any test is negative
+                  without positives (only-negative), otherwise 'unknown'
+                - CPS takes precedence over a negative BiomarkerStatus (e.g., status negative with CPS 5-9 is positive)
+    
+            - Missing biomarker data handling:
+                - All PatientIDs from index_date_df are included in the output
+                - Patients without any biomarker tests will have NaN values for all biomarker columns
+                - Missing ResultDate is imputed with SpecimenReceivedDate
+    
+            Output handling: 
+            - Duplicate PatientIDs are logged as warnings if found but retained in output
+            - Processed DataFrame is stored in self.biomarkers_df
+            """
+            # Input validation
+            if not isinstance(index_date_df, pd.DataFrame):
+                raise ValueError("index_date_df must be a pandas DataFrame")
+            if 'PatientID' not in index_date_df.columns:
+                raise ValueError("index_date_df must contain a 'PatientID' column")
+            if not index_date_column or index_date_column not in index_date_df.columns:
+                raise ValueError('index_date_column not found in index_date_df')
+            if index_date_df['PatientID'].duplicated().any():
+                raise ValueError("index_date_df contains duplicate PatientID values, which is not allowed")
+            
+            if days_before is not None:
+                if not isinstance(days_before, int) or days_before < 0:
+                    raise ValueError("days_before must be a non-negative integer or None")
+            if not isinstance(days_after, int) or days_after < 0:
+                raise ValueError("days_after must be a non-negative integer")
+            if cps_positive_cutoff is not None and cps_positive_cutoff not in self.PDL1_CPS_MAPPING:
+                raise ValueError(f"cps_positive_cutoff must be None or one of {list(self.PDL1_CPS_MAPPING)}")
+            
+            index_date_df = index_date_df.copy()
+            # Rename all columns from index_date_df except PatientID to avoid conflicts with merging and processing 
+            for col in index_date_df.columns:
+                if col != 'PatientID':  # Keep PatientID unchanged for merging
+                    index_date_df.rename(columns={col: f'imported_{col}'}, inplace=True)
+    
+            # Update index_date_column name
+            index_date_column = f'imported_{index_date_column}'
+    
+            try:
+                df = pd.read_csv(file_path)
+                logging.info(f"Successfully read Enhanced_AdvHeadNeckBiomarkers.csv file with shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+    
+                df['ResultDate'] = pd.to_datetime(df['ResultDate'])
+                df['SpecimenReceivedDate'] = pd.to_datetime(df['SpecimenReceivedDate'])
+    
+                # Impute missing ResultDate with SpecimenReceivedDate
+                df['ResultDate'] = np.where(df['ResultDate'].isna(), df['SpecimenReceivedDate'], df['ResultDate'])
+    
+                index_date_df[index_date_column] = pd.to_datetime(index_date_df[index_date_column])
+    
+                # Select PatientIDs that are included in the index_date_df the merge on 'left'
+                df = df[df.PatientID.isin(index_date_df.PatientID)]
+                df = pd.merge(
+                     df,
+                     index_date_df[['PatientID', index_date_column]],
+                     on = 'PatientID',
+                     how = 'left'
+                )
+                logging.info(f"Successfully merged Enhanced_AdvHeadNeckBiomarkers.csv df with index_date_df resulting in shape: {df.shape} and unique PatientIDs: {(df['PatientID'].nunique())}")
+                
+                # Create new variable 'index_to_result' that notes difference in days between resulted specimen and index date
+                df['index_to_result'] = (df['ResultDate'] - df[index_date_column]).dt.days
+                
+                # Select biomarkers that fall within desired before and after index date
+                if days_before is None:
+                    # Only filter for days after
+                    df_filtered = df[df['index_to_result'] <= days_after].copy()
+                else:
+                    # Filter for both before and after
+                    df_filtered = df[
+                        (df['index_to_result'] <= days_after) & 
+                        (df['index_to_result'] >= -days_before)
+                    ].copy()
+    
+                inconsistent = df_filtered[
+                    (df_filtered['BiomarkerStatus'] == 'PD-L1 positive') & 
+                    (df_filtered['CombinedPositiveScore'].isin(['0', '<1']))
+                ]
+    
+                if len(inconsistent) > 0:
+                    inconsistent_ids = inconsistent.PatientID.unique().tolist()
+                    logging.warning(f"Found {len(inconsistent)} records (PatientIDs: {inconsistent_ids}) with PD-L1 positive but CPS 0 or <1 - possible data quality issue")
+                
+                # Replace unknown CPS with empty (used for both status and CPS output)
+                df_filtered.loc[df_filtered['CombinedPositiveScore'] == "Unknown/not documented", 'CombinedPositiveScore'] = np.nan
+    
+                # Process PDL1 status: classify each test, then each patient
+                pdl1_tests = df_filtered.query('BiomarkerName == "PDL1"').copy()
+                cps_ordinal = pdl1_tests['CombinedPositiveScore'].map(self.PDL1_CPS_MAPPING)
+    
+                status_positive = pdl1_tests['BiomarkerStatus'].eq('PD-L1 positive')
+                status_negative = pdl1_tests['BiomarkerStatus'].eq('PD-L1 negative/not detected')
+    
+                if cps_positive_cutoff is not None:
+                    cutoff = self.PDL1_CPS_MAPPING[cps_positive_cutoff]
+                    cps_positive = cps_ordinal.ge(cutoff)   # NaN CPS -> False
+                    cps_negative = cps_ordinal.lt(cutoff)   # NaN CPS -> False
+                else:
+                    cps_positive = pd.Series(False, index = pdl1_tests.index)
+                    cps_negative = pd.Series(False, index = pdl1_tests.index)
+    
+                pdl1_tests['test_positive'] = status_positive | cps_positive
+                pdl1_tests['test_negative'] = (status_negative | cps_negative) & ~pdl1_tests['test_positive']
+    
+                PDL1_df = (
+                    pdl1_tests
+                    .groupby('PatientID')[['test_positive', 'test_negative']]
+                    .any()
+                    .assign(PDL1_status = lambda x: np.select(
+                        [x['test_positive'], x['test_negative']],
+                        ['positive', 'negative'],
+                        default = 'unknown'))
+                    .reset_index()
+                    [['PatientID', 'PDL1_status']]
+                )
+    
+                n_cps_override = int((status_negative & cps_positive).sum())
+                if n_cps_override > 0:
+                    logging.info(f"{n_cps_override} PD-L1 records with BiomarkerStatus 'PD-L1 negative/not detected' were classified positive based on CPS >= {cps_positive_cutoff}")
+    
+                # Process PDL1 staining 
+                if pdl1_result_type == 'cps': 
+                    # Use every PD-L1 row with a recorded CPS, regardless of BiomarkerStatus,
+                    # so negative results ('0', '<1') are retained
+                    pdl1_rows = df_filtered.query('BiomarkerName == "PDL1"').copy()
+                    pdl1_rows['PDL1_cps_ordinal_value'] = pdl1_rows['CombinedPositiveScore'].map(self.PDL1_CPS_MAPPING)
+    
+                    # Maximum CPS across all qualifying tests in the window
+                    PDL1_cps_df = (
+                        pdl1_rows
+                        .dropna(subset = ['PDL1_cps_ordinal_value'])
+                        .groupby('PatientID')['PDL1_cps_ordinal_value']
+                        .max()
+                        .reset_index()
+                    )
+                    reverse_pdl1_cps_dict = {v: k for k, v in self.PDL1_CPS_MAPPING.items()}
+                    PDL1_cps_df['PDL1_cps'] = PDL1_cps_df['PDL1_cps_ordinal_value'].map(reverse_pdl1_cps_dict)
+                    PDL1_cps_df = PDL1_cps_df.drop(columns = ['PDL1_cps_ordinal_value'])
+    
+                    # Merge dataframes -- start with index_date_df to ensure all PatientIDs are included
+                    final_df = index_date_df[['PatientID']].copy()
+                    final_df = pd.merge(final_df, PDL1_df, on = 'PatientID', how = 'left')
+                    final_df = pd.merge(final_df, PDL1_cps_df, on = 'PatientID', how = 'left')
+    
+                    final_df['PDL1_status'] = final_df['PDL1_status'].astype('category')
+    
+                    cps_dtype = pd.CategoricalDtype(
+                        categories = ['0', '<1', '1', '2-4', '5-9', '10-19',
+                                    '20-29', '30-39', '40-49', '50-59',
+                                    '60-69', '70-79', '80-89', '90-99', '100'],
+                                    ordered = True
+                    )
+                    
+                    final_df['PDL1_cps'] = final_df['PDL1_cps'].astype(cps_dtype)
+                    
+                elif pdl1_result_type == 'percent_staining': 
+                    # Use every PD-L1 row with a recorded percent staining, regardless of
+                    # BiomarkerStatus, so negative results ('0%', '< 1%') are retained
+                    pdl1_rows = df_filtered.query('BiomarkerName == "PDL1"').copy()
+                    pdl1_rows['PDL1_percent_staining_ordinal_value'] = pdl1_rows['PercentStaining'].map(self.PDL1_PERCENT_STAINING_MAPPING)
+    
+                    # Maximum percent staining across all qualifying tests in the window
+                    PDL1_percent_staining_df = (
+                        pdl1_rows
+                        .dropna(subset = ['PDL1_percent_staining_ordinal_value'])
+                        .groupby('PatientID')['PDL1_percent_staining_ordinal_value']
+                        .max()
+                        .reset_index()
+                    )
+                    reverse_pdl1_percent_staining_dict = {v: k for k, v in self.PDL1_PERCENT_STAINING_MAPPING.items()}
+                    PDL1_percent_staining_df['PDL1_percent_staining'] = PDL1_percent_staining_df['PDL1_percent_staining_ordinal_value'].map(reverse_pdl1_percent_staining_dict)
+                    PDL1_percent_staining_df = PDL1_percent_staining_df.drop(columns = ['PDL1_percent_staining_ordinal_value'])
+    
+                    # Merge dataframes -- start with index_date_df to ensure all PatientIDs are included
+                    final_df = index_date_df[['PatientID']].copy()
+                    final_df = pd.merge(final_df, PDL1_df, on = 'PatientID', how = 'left')
+                    final_df = pd.merge(final_df, PDL1_percent_staining_df, on = 'PatientID', how = 'left')
+    
+                    final_df['PDL1_status'] = final_df['PDL1_status'].astype('category')
+    
+                    percent_staining_dtype = pd.CategoricalDtype(
+                        categories = ['0%', '< 1%', '1%', '2% - 4%', '5% - 9%', '10% - 19%',
+                                    '20% - 29%', '30% - 39%', '40% - 49%', '50% - 59%',
+                                    '60% - 69%', '70% - 79%', '80% - 89%', '90% - 99%', '100%'],
+                                    ordered = True
+                    )
+                    
+                    final_df['PDL1_percent_staining'] = final_df['PDL1_percent_staining'].astype(percent_staining_dtype)
+    
+                else: 
+                    raise ValueError("pdl1_result_type must be 'cps' or 'percent_staining'")
+    
+                # Check for duplicate PatientIDs
+                if len(final_df) > final_df['PatientID'].nunique():
+                    duplicate_ids = final_df[final_df.duplicated(subset = ['PatientID'], keep = False)]['PatientID'].unique()
+                    logging.warning(f"Duplicate PatientIDs found: {duplicate_ids}")
+    
+                logging.info(f"Successfully processed Enhanced_AdvHeadNeckBiomarkers.csv file with final shape: {final_df.shape} and unique PatientIDs: {(final_df['PatientID'].nunique())}")
+                self.biomarkers_df = final_df
+                return final_df
+    
+            except Exception as e:
+                logging.error(f"Error processing Enhanced_AdvHeadNeckBiomarkers.csv file: {e}")
+                return None
+        
     def process_mortality(self,
                           file_path: str,
                           index_date_df: pd.DataFrame,
